@@ -1,7 +1,16 @@
 import io
+import os
 
 import pytest
 from PIL import Image
+
+# 测试环境可能携带 SOCKS/HTTP 代理,会让 httpx 初始化失败或走真实网络;
+# 测试全部 mock 外部 API,不需要代理。
+for _proxy_key in (
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+    "http_proxy", "https_proxy", "all_proxy",
+):
+    os.environ.pop(_proxy_key, None)
 
 
 @pytest.fixture
