@@ -1,0 +1,16 @@
+# Codewhale 运行时状态(不入库)
+.codewhale/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+
+# 环境与密钥
+.env
+*.toml.local
