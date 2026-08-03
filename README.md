@@ -83,6 +83,17 @@ for chunk in ask_with_image("photo.jpg", "讲个故事", stream=True):
 - **请求体上限**:服务端请求体超过 32 MiB 返回 413,请求体流式读取,
   无 `Content-Length` 的 chunked 请求同样受限。
 
+## 已知限制与后续工作
+
+以下问题已确认但不在当前版本修复,列为后续工作:
+
+- **异步 API**: 目前仅提供同步接口(`ask` / `ask_with_image` / `describe_image`)。
+  计划新增 `async` 版本(含流式协程),供 FastAPI 服务端复用;
+- **CI**: 仓库尚无 CI(GitHub Actions)。建议配置 pytest 在 Python 3.10-3.12
+  矩阵上运行,并开启依赖安全扫描;
+- **分支保护**: 主分支保护属 GitHub 仓库设置,需人工开启(建议要求 PR 评审
+  与 CI 通过后才能合并)。
+
 ## 许可证
 
 MIT
