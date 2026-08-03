@@ -352,3 +352,87 @@ def test_env_backend_same_value_keeps_toml_config(tmp_path):
     assert cfg.vision.base_url == "https://anthropic-proxy.example.com"
     assert cfg.vision.api_key == "sk-anthropic-toml"
     assert cfg.vision.model == "claude-sonnet-4-5"
+
+
+def test_env_interpolated_backend_is_treated_as_switch(tmp_path):
+    """P1: backend = "${VISION_BACKEND}" must not keep the old TOML host —
+    the env-derived backend is a switch even though the expanded value
+    equals the env value."""
+    toml = tmp_path / "deepsee.toml"
+    toml.write_text(
+        "[deepseek]\n"
+        'api_key = "sk-ds-1"\n'
+        "[vision]\n"
+        'backend = "${VISION_BACKEND}"\n'
+        'api_key = "sk-old-provider"\n'
+        'model = "qwen-vl"\n'
+        'base_url = "https://old-vision.example.com/v1"\n'
+    )
+    env = {
+        "VISION_BACKEND": "anthropic",
+        "VISION_API_KEY": "sk-anthropic-new",
+        "VISION_MODEL": "claude-sonnet-4-5",
+    }
+    cfg = load_config(path=toml, env=env)
+    assert cfg.vision.backend == "anthropic"
+    assert cfg.vision.base_url == "https://api.anthropic.com"
+    assert cfg.vision.api_key == "sk-anthropic-new"
+    assert cfg.vision.model == "claude-sonnet-4-5"
+
+
+def test_env_interpolated_backend_requires_new_key(tmp_path):
+    toml = tmp_path / "deepsee.toml"
+    toml.write_text(
+        "[deepseek]\n"
+        'api_key = "sk-ds-1"\n'
+        "[vision]\n"
+        'backend = "${VISION_BACKEND}"\n'
+        'api_key = "sk-old-provider"\n'
+        'model = "qwen-vl"\n'
+        'base_url = "https://old-vision.example.com/v1"\n'
+    )
+    env = {"VISION_BACKEND": "anthropic", "VISION_MODEL": "claude-sonnet-4-5"}
+    with pytest.raises(ConfigError, match="VISION_API_KEY"):
+        load_config(path=toml, env=env)
+
+
+def test_env_backend_switch_skips_old_env_placeholders(tmp_path):
+    """P2: old ${OLD_*} placeholders must not be expanded when switching —
+    loading must succeed with a complete new env config even if the old
+    placeholders reference unset variables."""
+    toml = tmp_path / "deepsee.toml"
+    toml.write_text(
+        "[deepseek]\n"
+        'api_key = "sk-ds-1"\n'
+        "[vision]\n"
+        'backend = "${VISION_BACKEND}"\n'
+        'api_key = "${OLD_PROVIDER_KEY}"\n'
+        'model = "${OLD_PROVIDER_MODEL}"\n'
+        'base_url = "https://old-vision.example.com/v1"\n'
+    )
+    env = {
+        "VISION_BACKEND": "anthropic",
+        "VISION_API_KEY": "sk-anthropic-new",
+        "VISION_MODEL": "claude-sonnet-4-5",
+    }
+    cfg = load_config(path=toml, env=env)
+    assert cfg.vision.api_key == "sk-anthropic-new"
+    assert cfg.vision.model == "claude-sonnet-4-5"
+    assert cfg.vision.base_url == "https://api.anthropic.com"
+
+
+def test_env_backend_switch_invalid_backend_reported_first(tmp_path):
+    """P3: an invalid backend is reported before missing key/model."""
+    toml = tmp_path / "deepsee.toml"
+    toml.write_text(
+        "[deepseek]\n"
+        'api_key = "sk-ds-1"\n'
+        "[vision]\n"
+        'backend = "openai_compatible"\n'
+        'api_key = "sk-old-provider"\n'
+        'model = "qwen-vl"\n'
+        'base_url = "https://old-vision.example.com/v1"\n'
+    )
+    env = {"VISION_BACKEND": "bogus"}
+    with pytest.raises(ConfigError, match="backend"):
+        load_config(path=toml, env=env)

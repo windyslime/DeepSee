@@ -123,12 +123,21 @@ def load_config(
             return default
         return _expand_env(str(value), env)
 
+    # Raw TOML value without ${ENV} expansion: used to detect whether the
+    # TOML backend is itself an environment reference.
+    def toml_raw_str(section: str, key: str, default: str = "") -> str:
+        value = raw.get(section, {}).get(key, default)
+        if value == "":
+            return default
+        return str(value)
+
     retries_toml = raw.get("deepseek", {}).get("retries", 2)
     try:
         retries = int(retries_toml)
     except (TypeError, ValueError):
         raise ConfigError(f"retries 必须是整数,当前: {retries_toml!r}")
 
+    vision_backend_raw = toml_raw_str("vision", "backend", "openai_compatible")
     vision_backend_toml = toml_str("vision", "backend", "openai_compatible")
 
     # Environment overrides (highest priority).
@@ -154,7 +163,16 @@ def load_config(
     # anthropic)不算切换,TOML 配置原样保留 —— 自定义代理/审计/数据驻留
     # 场景依赖这一行为。
     vision_backend = env_val("VISION_BACKEND", vision_backend_toml)
-    backend_switched = vision_backend != vision_backend_toml
+    if vision_backend not in VALID_BACKENDS:
+        raise ConfigError(
+            f"vision.backend 非法: {vision_backend!r};"
+            f"可选值: {', '.join(VALID_BACKENDS)}"
+        )
+    # TOML 若用 ${ENV} 引用 backend(如 backend = "${VISION_BACKEND}"),
+    # 展开后与 env_val 的结果必然同值,按值比较会误判为"未切换"而保留
+    # 旧 base_url —— 环境插值得到的 backend 一律按切换处理。
+    backend_env_driven = vision_backend_raw.startswith("${") and vision_backend_raw.endswith("}")
+    backend_switched = backend_env_driven or vision_backend != vision_backend_toml
     vision_base_url_toml = "" if backend_switched else toml_str("vision", "base_url", "")
     vision_base_url = vision_base_url_toml or DEFAULT_VISION_BASE_URLS.get(vision_backend) or ""
     if backend_switched:
@@ -170,6 +188,13 @@ def load_config(
                 "新的 VISION_MODEL;切换后端后不能继承旧后端的模型,"
                 "请设置 DeepSee_VISION_MODEL 或 VISION_MODEL"
             )
+        # 切换分支完全不读取旧 TOML 的 key/model —— 其 ${ENV} 占位符可能
+        # 引用了已失效的环境变量,提前展开会在新配置已完整时仍报错。
+        vision_api_key = env_val("VISION_API_KEY", "")
+        vision_model = env_val("VISION_MODEL", "")
+    else:
+        vision_api_key = env_val("VISION_API_KEY", toml_str("vision", "api_key"))
+        vision_model = env_val("VISION_MODEL", toml_str("vision", "model"))
 
     deepseek = DeepSeekConfig(
         api_key=env_val("DEEPSEEK_API_KEY", toml_str("deepseek", "api_key")),
@@ -178,8 +203,8 @@ def load_config(
     )
     vision = VisionConfig(
         backend=vision_backend,
-        api_key=env_val("VISION_API_KEY", toml_str("vision", "api_key")),
-        model=env_val("VISION_MODEL", toml_str("vision", "model")),
+        api_key=vision_api_key,
+        model=vision_model,
         base_url=env_val("VISION_BASE_URL", vision_base_url) or None,
     )
     retries = int(env_val("RETRIES", str(retries)))

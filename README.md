@@ -34,7 +34,7 @@ base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 model = "qwen-vl-max"
 ```
 
-切换视觉后端只需修改 `backend` / `base_url` / `model` 三个字段。
+切换视觉后端只需修改 `backend` / `api_key` / `base_url` / `model` 四个字段。
 
 用环境变量覆盖 `VISION_BACKEND` 切换后端时,TOML 中的 `base_url` / `api_key`
 / `model` 不会沿用(它们属于旧后端:base_url 指向旧主机,key 属于旧供应商,
