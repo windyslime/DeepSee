@@ -52,9 +52,10 @@ def test_models_endpoint(use_cfg):
 
 
 def test_chat_text(use_cfg, monkeypatch):
-    monkeypatch.setattr(
-        "deepsee_server.app.ask", lambda question, **kw: "你好!"
-    )
+    async def fake_ask(question, **kw):
+        return "你好!"
+
+    monkeypatch.setattr("deepsee_server.app.ask_async", fake_ask)
     resp = client.post(
         "/v1/chat/completions",
         json={"model": "anything", "messages": [{"role": "user", "content": "你好"}]},
@@ -68,12 +69,14 @@ def test_chat_text(use_cfg, monkeypatch):
 def test_chat_with_image(use_cfg, monkeypatch):
     seen = {}
 
-    def fake_ask_with_image(image, question, **kw):
+    async def fake_ask_with_image(image, question, **kw):
         seen["image"] = image
         seen["question"] = question
         return "图里是一只猫"
 
-    monkeypatch.setattr("deepsee_server.app.ask_with_image", fake_ask_with_image)
+    monkeypatch.setattr(
+        "deepsee_server.app.ask_with_image_async", fake_ask_with_image
+    )
     resp = client.post(
         "/v1/chat/completions",
         json={
@@ -95,9 +98,14 @@ def test_chat_with_image(use_cfg, monkeypatch):
 
 
 def test_chat_stream(use_cfg, monkeypatch):
-    monkeypatch.setattr(
-        "deepsee_server.app.ask", lambda question, **kw: iter(["你", "好"])
-    )
+    async def fake_ask(question, **kw):
+        async def gen():
+            yield "你"
+            yield "好"
+
+        return gen()
+
+    monkeypatch.setattr("deepsee_server.app.ask_async", fake_ask)
     resp = client.post(
         "/v1/chat/completions",
         json={"stream": True, "messages": [{"role": "user", "content": "hi"}]},
@@ -189,8 +197,11 @@ def test_analyze_body_too_large_413(use_cfg, monkeypatch):
 
 
 def test_analyze_endpoint(use_cfg, monkeypatch):
+    async def fake_ask_with_image(image, question, **kw):
+        return "分析结果"
+
     monkeypatch.setattr(
-        "deepsee_server.app.ask_with_image", lambda image, question, **kw: "分析结果"
+        "deepsee_server.app.ask_with_image_async", fake_ask_with_image
     )
     resp = client.post(
         "/analyze", json={"image": _png_data_url(), "question": "这是什么?"}
@@ -241,10 +252,10 @@ def test_analyze_numeric_image_400(use_cfg):
 def test_chat_image_error_maps_to_400(use_cfg, monkeypatch):
     from deepsee.errors import ImageError
 
-    def boom(*args, **kwargs):
+    async def boom(*args, **kwargs):
         raise ImageError("图片下载失败: 目标被拒绝")
 
-    monkeypatch.setattr("deepsee_server.app.ask_with_image", boom)
+    monkeypatch.setattr("deepsee_server.app.ask_with_image_async", boom)
     resp = client.post(
         "/v1/chat/completions",
         json={
@@ -265,10 +276,10 @@ def test_chat_image_error_maps_to_400(use_cfg, monkeypatch):
 def test_analyze_image_error_maps_to_400(use_cfg, monkeypatch):
     from deepsee.errors import ImageError
 
-    def boom(*args, **kwargs):
+    async def boom(*args, **kwargs):
         raise ImageError("图片解码失败")
 
-    monkeypatch.setattr("deepsee_server.app.ask_with_image", boom)
+    monkeypatch.setattr("deepsee_server.app.ask_with_image_async", boom)
     resp = client.post("/analyze", json={"image": _png_data_url()})
     assert resp.status_code == 400
 

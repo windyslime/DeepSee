@@ -21,7 +21,7 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from deepsee import ask, ask_with_image, load_config
+from deepsee import ask_async, ask_with_image_async, load_config
 from deepsee.errors import ImageError
 from deepsee.pipeline.image import MAX_IMAGE_BYTES
 
@@ -194,9 +194,11 @@ async def chat_completions(request: Request):
 
     try:
         if image is not None:
-            answer = ask_with_image(image, text or "请描述这张图片", stream=stream, config=cfg)
+            answer = await ask_with_image_async(
+                image, text or "请描述这张图片", stream=stream, config=cfg
+            )
         else:
-            answer = ask(text, stream=stream, config=cfg)
+            answer = await ask_async(text, stream=stream, config=cfg)
     except ImageError as exc:
         # 图片加载/解码失败(SSRF 拒绝、字节/像素超限、格式不支持等)映射为 4xx
         return JSONResponse(
@@ -207,8 +209,8 @@ async def chat_completions(request: Request):
     if not stream:
         return JSONResponse(_completion_payload(answer, model_id))
 
-    def gen():
-        for chunk in answer:
+    async def gen():
+        async for chunk in answer:
             payload = {
                 "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
                 "object": "chat.completion.chunk",
@@ -264,7 +266,7 @@ async def analyze(request: Request):
         )
     cfg = _current_config()
     try:
-        answer = ask_with_image(img, question or "请描述这张图片", config=cfg)
+        answer = await ask_with_image_async(img, question or "请描述这张图片", config=cfg)
     except ImageError as exc:
         return JSONResponse(
             {"error": {"message": str(exc), "type": "invalid_request_error"}},
