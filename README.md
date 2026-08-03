@@ -64,6 +64,29 @@ for chunk in ask_with_image("photo.jpg", "讲个故事", stream=True):
     print(chunk, end="", flush=True)
 ```
 
+## 异步 API
+
+所有同步接口都有对应的 `async` 版本,签名一致:
+
+```python
+import asyncio
+from deepsee import ask_with_image_async
+
+async def main():
+    # 非流式
+    answer = await ask_with_image_async("photo.jpg", "这张图里有什么?")
+    print(answer)
+
+    # 流式(async 迭代器)
+    async for chunk in ask_with_image_async("photo.jpg", "讲个故事", stream=True):
+        print(chunk, end="", flush=True)
+
+asyncio.run(main())
+```
+
+另有 `ask_async`(纯文本)与 `describe_image_async`(仅视觉分析)。
+错误语义与同步接口一致;图片处理(含 SSRF 防护)复用同一套同步管线。
+
 ## 安全限制
 
 图片加载对服务化入口(`/v1/chat/completions` 的 `image_url`、`/analyze`)统一生效:
@@ -87,8 +110,6 @@ for chunk in ask_with_image("photo.jpg", "讲个故事", stream=True):
 
 以下问题已确认但不在当前版本修复,列为后续工作:
 
-- **异步 API**: 目前仅提供同步接口(`ask` / `ask_with_image` / `describe_image`)。
-  计划新增 `async` 版本(含流式协程),供 FastAPI 服务端复用;
 - **CI**: 仓库尚无 CI(GitHub Actions)。建议配置 pytest 在 Python 3.10-3.12
   矩阵上运行,并开启依赖安全扫描;
 - **分支保护**: 主分支保护属 GitHub 仓库设置,需人工开启(建议要求 PR 评审
