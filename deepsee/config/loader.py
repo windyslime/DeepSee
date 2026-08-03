@@ -96,6 +96,8 @@ def _validate(
     if vision.base_url is None:
         raise ConfigError("缺少 vision.base_url:当前后端必须显式提供 base_url")
     _validate_base_url(vision.base_url, "vision")
+    if not vision.model:
+        raise ConfigError("缺少 vision.model:当前后端必须显式提供模型")
 
 
 def load_config(
@@ -127,9 +129,7 @@ def load_config(
     except (TypeError, ValueError):
         raise ConfigError(f"retries 必须是整数,当前: {retries_toml!r}")
 
-    vision_backend = toml_str("vision", "backend", "openai_compatible")
-    vision_base_url_toml = toml_str("vision", "base_url", "")
-    vision_base_url = vision_base_url_toml or DEFAULT_VISION_BASE_URLS.get(vision_backend) or ""
+    vision_backend_toml = toml_str("vision", "backend", "openai_compatible")
 
     # Environment overrides (highest priority).
     # Accept both the prefixed form (DeepSee_DEEPSEEK_API_KEY) and the bare
@@ -140,13 +140,44 @@ def load_config(
             return prefixed
         return env.get(section_key, toml_value)
 
+    def env_has(section_key: str) -> bool:
+        return f"{ENV_PREFIX}{section_key}" in env or section_key in env
+
+    # backend + base_url + api_key + model 是一个配置束。backend 被环境变量
+    # 异值切换时,旧 TOML 的三项一律不得继承:
+    # - base_url:仍指向旧 backend 的主机,沿用会把新 backend 的 API key 发送
+    #   到错误主机;切换时丢弃,回落到新 backend 的官方默认主机(用户仍可用
+    #   VISION_BASE_URL 显式覆盖)。
+    # - api_key / model:属于旧供应商,不得继承;新 backend 必须由环境变量
+    #   显式提供,否则抛 ConfigError,而不是静默把旧供应商密钥发给新供应商。
+    # 环境变量与 TOML 同值(如 VISION_BACKEND=anthropic 且 TOML 也是
+    # anthropic)不算切换,TOML 配置原样保留 —— 自定义代理/审计/数据驻留
+    # 场景依赖这一行为。
+    vision_backend = env_val("VISION_BACKEND", vision_backend_toml)
+    backend_switched = vision_backend != vision_backend_toml
+    vision_base_url_toml = "" if backend_switched else toml_str("vision", "base_url", "")
+    vision_base_url = vision_base_url_toml or DEFAULT_VISION_BASE_URLS.get(vision_backend) or ""
+    if backend_switched:
+        if not env_has("VISION_API_KEY"):
+            raise ConfigError(
+                f"VISION_BACKEND 已将后端切换为 {vision_backend!r},但未显式提供"
+                "新的 VISION_API_KEY;切换后端后不能继承旧后端的 API key,"
+                "请设置 DeepSee_VISION_API_KEY 或 VISION_API_KEY"
+            )
+        if not env_has("VISION_MODEL"):
+            raise ConfigError(
+                f"VISION_BACKEND 已将后端切换为 {vision_backend!r},但未显式提供"
+                "新的 VISION_MODEL;切换后端后不能继承旧后端的模型,"
+                "请设置 DeepSee_VISION_MODEL 或 VISION_MODEL"
+            )
+
     deepseek = DeepSeekConfig(
         api_key=env_val("DEEPSEEK_API_KEY", toml_str("deepseek", "api_key")),
         base_url=env_val("DEEPSEEK_BASE_URL", toml_str("deepseek", "base_url", "https://api.deepseek.com")),
         model=env_val("DEEPSEEK_MODEL", toml_str("deepseek", "model", "deepseek-chat")),
     )
     vision = VisionConfig(
-        backend=env_val("VISION_BACKEND", vision_backend),
+        backend=vision_backend,
         api_key=env_val("VISION_API_KEY", toml_str("vision", "api_key")),
         model=env_val("VISION_MODEL", toml_str("vision", "model")),
         base_url=env_val("VISION_BASE_URL", vision_base_url) or None,

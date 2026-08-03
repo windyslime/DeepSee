@@ -36,6 +36,14 @@ model = "qwen-vl-max"
 
 切换视觉后端只需修改 `backend` / `base_url` / `model` 三个字段。
 
+用环境变量覆盖 `VISION_BACKEND` 切换后端时,TOML 中的 `base_url` / `api_key`
+/ `model` 不会沿用(它们属于旧后端:base_url 指向旧主机,key 属于旧供应商,
+会被发给错误的主机/供应商)。`base_url` 回落到新后端的官方默认主机 ——
+Anthropic 和 Gemini 有默认主机;OpenAI-compatible 没有默认值,必须显式设置
+`VISION_BASE_URL`。`api_key` 与 `model` 必须由环境变量显式提供,否则报错。
+环境变量与 TOML 中相同的 `VISION_BACKEND` 不算切换,TOML 配置原样保留
+(自定义代理 / 审计 / 数据驻留场景)。
+
 ## 支持的后端
 
 - **openai_compatible**: Qwen-VL、GPT-4o、GLM-4V、Moonshot 等任意 OpenAI 兼容服务
