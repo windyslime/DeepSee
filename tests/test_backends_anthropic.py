@@ -65,3 +65,25 @@ def test_factory_selects_anthropic():
         retries=1,
     )
     assert isinstance(backend, AnthropicBackend)
+
+def test_connect_error_wrapped(sample_image_bytes):
+    backend = make_backend(retries=0)
+    with respx.mock:
+        respx.post("https://api.anthropic.com/v1/messages").mock(
+            side_effect=httpx.ConnectError("connection refused")
+        )
+        with pytest.raises(VisionBackendError) as exc_info:
+            backend.describe(sample_image_bytes, "p")
+    assert "网络错误" in str(exc_info.value)
+    assert exc_info.value.backend == "anthropic"
+
+
+def test_empty_content_wrapped(sample_image_bytes):
+    backend = make_backend()
+    with respx.mock:
+        respx.post("https://api.anthropic.com/v1/messages").mock(
+            return_value=httpx.Response(200, json={"content": []})
+        )
+        with pytest.raises(VisionBackendError) as exc_info:
+            backend.describe(sample_image_bytes, "p")
+    assert "响应解析失败" in str(exc_info.value)

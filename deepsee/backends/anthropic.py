@@ -54,7 +54,13 @@ class AnthropicBackend(VisionBackend):
                 model=self.model,
                 status_code=exc.response.status_code,
             ) from exc
-        except (KeyError, ValueError, TypeError) as exc:
+        except httpx.HTTPError as exc:
+            raise VisionBackendError(
+                f"视觉后端 {self.backend_name} 网络错误: {exc.__class__.__name__}",
+                backend=self.backend_name,
+                model=self.model,
+            ) from exc
+        except (KeyError, ValueError, TypeError, IndexError) as exc:
             raise VisionBackendError(
                 f"视觉后端 {self.backend_name} 响应解析失败",
                 backend=self.backend_name,

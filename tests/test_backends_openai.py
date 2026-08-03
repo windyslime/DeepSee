@@ -121,3 +121,25 @@ def test_factory_unknown_backend_raises():
         create_backend(
             VisionConfig(backend="nope", api_key="k", model="m"), retries=1
         )
+
+def test_connect_error_wrapped(sample_image_bytes):
+    backend = make_backend(retries=0)
+    with respx.mock:
+        respx.post("https://vision.example.com/v1/chat/completions").mock(
+            side_effect=httpx.ConnectError("connection refused")
+        )
+        with pytest.raises(VisionBackendError) as exc_info:
+            backend.describe(sample_image_bytes, "p")
+    assert "网络错误" in str(exc_info.value)
+    assert exc_info.value.backend == "openai_compatible"
+
+
+def test_empty_choices_wrapped(sample_image_bytes):
+    backend = make_backend()
+    with respx.mock:
+        respx.post("https://vision.example.com/v1/chat/completions").mock(
+            return_value=httpx.Response(200, json={"choices": []})
+        )
+        with pytest.raises(VisionBackendError) as exc_info:
+            backend.describe(sample_image_bytes, "p")
+    assert "响应解析失败" in str(exc_info.value)
