@@ -133,6 +133,61 @@ def test_chat_bad_image_400(use_cfg):
     assert resp.status_code == 400
 
 
+def test_chat_rejects_file_url_400(use_cfg):
+    # 服务端入口禁止本地路径/file://,防止任意文件读取
+    resp = client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": "file:///etc/passwd"}}
+                    ],
+                }
+            ]
+        },
+    )
+    assert resp.status_code == 400
+
+
+def test_chat_data_url_over_limit_400(use_cfg, monkeypatch):
+    monkeypatch.setattr("deepsee_server.app.MAX_IMAGE_BYTES", 64)
+    big_b64 = base64.b64encode(b"x" * 512).decode("ascii")
+    resp = client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{big_b64}"},
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    assert resp.status_code == 400
+
+
+def test_chat_body_too_large_413(use_cfg, monkeypatch):
+    monkeypatch.setattr("deepsee_server.app._MAX_REQUEST_BODY", 64)
+    resp = client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "x" * 4096}]},
+    )
+    assert resp.status_code == 413
+
+
+def test_analyze_body_too_large_413(use_cfg, monkeypatch):
+    monkeypatch.setattr("deepsee_server.app._MAX_REQUEST_BODY", 64)
+    resp = client.post("/analyze", json={"image": "x" * 4096})
+    assert resp.status_code == 413
+
+
 def test_analyze_endpoint(use_cfg, monkeypatch):
     monkeypatch.setattr(
         "deepsee_server.app.ask_with_image", lambda image, question, **kw: "分析结果"
@@ -142,3 +197,99 @@ def test_analyze_endpoint(use_cfg, monkeypatch):
     )
     assert resp.status_code == 200
     assert resp.json() == {"kind": "auto", "text": "分析结果"}
+
+
+def test_chat_chunked_body_too_large_413(use_cfg, monkeypatch):
+    """无 Content-Length 的 chunked 请求必须在读取阶段被拦截。"""
+    monkeypatch.setattr("deepsee_server.app._MAX_REQUEST_BODY", 64)
+    payload = json.dumps(
+        {"messages": [{"role": "user", "content": "x" * 4096}]}
+    ).encode()
+    resp = client.post("/v1/chat/completions", content=(c for c in [payload]))
+    assert resp.status_code == 413
+
+
+def test_analyze_chunked_body_too_large_413(use_cfg, monkeypatch):
+    monkeypatch.setattr("deepsee_server.app._MAX_REQUEST_BODY", 64)
+    resp = client.post("/analyze", content=(c for c in [b"x" * 4096]))
+    assert resp.status_code == 413
+
+
+def test_chat_numeric_image_url_400(use_cfg):
+    # url 字段是数字等非字符串时不得 500
+    resp = client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": 123}}
+                    ],
+                }
+            ]
+        },
+    )
+    assert resp.status_code == 400
+
+
+def test_analyze_numeric_image_400(use_cfg):
+    resp = client.post("/analyze", json={"image": 123, "question": "q"})
+    assert resp.status_code == 400
+
+
+def test_chat_image_error_maps_to_400(use_cfg, monkeypatch):
+    from deepsee.errors import ImageError
+
+    def boom(*args, **kwargs):
+        raise ImageError("图片下载失败: 目标被拒绝")
+
+    monkeypatch.setattr("deepsee_server.app.ask_with_image", boom)
+    resp = client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": _png_data_url()}}
+                    ],
+                }
+            ]
+        },
+    )
+    assert resp.status_code == 400
+    assert "拒绝" in resp.json()["error"]["message"]
+
+
+def test_analyze_image_error_maps_to_400(use_cfg, monkeypatch):
+    from deepsee.errors import ImageError
+
+    def boom(*args, **kwargs):
+        raise ImageError("图片解码失败")
+
+    monkeypatch.setattr("deepsee_server.app.ask_with_image", boom)
+    resp = client.post("/analyze", json={"image": _png_data_url()})
+    assert resp.status_code == 400
+
+
+def test_chat_invalid_json_400(use_cfg):
+    resp = client.post("/v1/chat/completions", content=b"{not json")
+    assert resp.status_code == 400
+
+
+def test_analyze_invalid_json_400(use_cfg):
+    resp = client.post("/analyze", content=b"not json")
+    assert resp.status_code == 400
+
+
+def test_chat_json_root_not_object_400(use_cfg):
+    # 合法 JSON 但根节点不是对象([] / "hello" / null),不得 500
+    for doc in (b"[]", b'"hello"', b"null", b"123"):
+        resp = client.post("/v1/chat/completions", content=doc)
+        assert resp.status_code == 400, f"{doc!r} -> {resp.status_code}"
+
+
+def test_analyze_json_root_not_object_400(use_cfg):
+    resp = client.post("/analyze", content=b"[]")
+    assert resp.status_code == 400

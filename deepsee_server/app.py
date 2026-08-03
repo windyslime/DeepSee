@@ -22,12 +22,45 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from deepsee import ask, ask_with_image, load_config
+from deepsee.errors import ImageError
+from deepsee.pipeline.image import MAX_IMAGE_BYTES
 
 app = FastAPI(title="DeepSee Server", version="0.1.0")
+
+# 请求体上限:含 base64 data URL 的图片请求会膨胀约 4/3,留出 JSON 与文本余量。
+_MAX_REQUEST_BODY = 32 * 1024 * 1024
 
 
 def _current_config():
     return load_config()
+
+
+def _body_too_large(request: Request) -> bool:
+    """Content-Length 预检(快速路径),防止超大请求体在读入内存前被处理。"""
+    length = request.headers.get("content-length")
+    if not length:
+        return False  # chunked 请求无 Content-Length,由 _read_body_limited 兜底
+    try:
+        return int(length) > _MAX_REQUEST_BODY
+    except ValueError:
+        return False
+
+
+async def _read_body_limited(request: Request) -> bytes | None:
+    """流式读取请求体并强制字节上限;超限返回 None。
+
+    ``await request.json()`` 会把任意大小的请求体完整缓冲到内存,chunked
+    请求(无 Content-Length)会绕过 ``_body_too_large`` 预检;这里在读取
+    阶段逐块累计,超限即中止。
+    """
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > _MAX_REQUEST_BODY:
+            return None
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 @app.get("/v1/models")
@@ -48,12 +81,22 @@ def list_models():
 
 
 def _extract_image_from_url(url: str) -> bytes | str:
-    """Accept base64 data: URLs (→ bytes) or http(s) URLs (→ URL string)."""
+    """Accept base64 data: URLs (→ bytes) or http(s) URLs (→ URL string).
+
+    http(s) URL 的下载防护(SSRF / 字节上限)在 ``load_image`` 层;data URL
+    在此解码并做字节上限检查;其他形式(含 ``file://`` 本地路径)一律拒绝。
+    """
+    if not isinstance(url, str):
+        # JSON 里 url 字段可能是数字/布尔等,直接调用 str 方法会 500
+        raise ValueError(f"不支持的图片 URL 形式: {url!r}")
     if url.startswith("data:"):
         m = re.match(r"data:[^;]+;base64,(.*)", url, re.DOTALL)
         if not m:
             raise ValueError("仅支持 base64 data URL 图片")
-        return base64.b64decode(m.group(1))
+        raw = base64.b64decode(m.group(1))
+        if len(raw) > MAX_IMAGE_BYTES:
+            raise ValueError(f"图片数据过大(超过 {MAX_IMAGE_BYTES // (1024 * 1024)} MiB)")
+        return raw
     if url.startswith("http://") or url.startswith("https://"):
         return url
     raise ValueError(f"不支持的图片 URL 形式: {url[:60]}")
@@ -100,7 +143,30 @@ def _completion_payload(content: str, model: str) -> dict[str, Any]:
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
-    body = await request.json()
+    if _body_too_large(request):
+        return JSONResponse(
+            {"error": {"message": "请求体过大", "type": "invalid_request_error"}},
+            status_code=413,
+        )
+    body_bytes = await _read_body_limited(request)
+    if body_bytes is None:
+        return JSONResponse(
+            {"error": {"message": "请求体过大", "type": "invalid_request_error"}},
+            status_code=413,
+        )
+    try:
+        body = json.loads(body_bytes)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return JSONResponse(
+            {"error": {"message": "请求体不是合法 JSON", "type": "invalid_request_error"}},
+            status_code=400,
+        )
+    if not isinstance(body, dict):
+        # [] / "hello" / null 等合法 JSON 但没有 .get,直接调用会 500
+        return JSONResponse(
+            {"error": {"message": "请求体必须是 JSON 对象", "type": "invalid_request_error"}},
+            status_code=400,
+        )
     stream = bool(body.get("stream", False))
     messages = body.get("messages", [])
     # 请求里的 model 字段接受任意值:不写死、不强制匹配,按配置执行
@@ -126,10 +192,17 @@ async def chat_completions(request: Request):
             status_code=400,
         )
 
-    if image is not None:
-        answer = ask_with_image(image, text or "请描述这张图片", stream=stream, config=cfg)
-    else:
-        answer = ask(text, stream=stream, config=cfg)
+    try:
+        if image is not None:
+            answer = ask_with_image(image, text or "请描述这张图片", stream=stream, config=cfg)
+        else:
+            answer = ask(text, stream=stream, config=cfg)
+    except ImageError as exc:
+        # 图片加载/解码失败(SSRF 拒绝、字节/像素超限、格式不支持等)映射为 4xx
+        return JSONResponse(
+            {"error": {"message": str(exc), "type": "invalid_request_error"}},
+            status_code=400,
+        )
 
     if not stream:
         return JSONResponse(_completion_payload(answer, model_id))
@@ -152,7 +225,29 @@ async def chat_completions(request: Request):
 @app.post("/analyze")
 async def analyze(request: Request):
     """Internal vision-only analysis (for the future GUI / Codewhale flow)."""
-    body = await request.json()
+    if _body_too_large(request):
+        return JSONResponse(
+            {"error": {"message": "请求体过大", "type": "invalid_request_error"}},
+            status_code=413,
+        )
+    body_bytes = await _read_body_limited(request)
+    if body_bytes is None:
+        return JSONResponse(
+            {"error": {"message": "请求体过大", "type": "invalid_request_error"}},
+            status_code=413,
+        )
+    try:
+        body = json.loads(body_bytes)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return JSONResponse(
+            {"error": {"message": "请求体不是合法 JSON", "type": "invalid_request_error"}},
+            status_code=400,
+        )
+    if not isinstance(body, dict):
+        return JSONResponse(
+            {"error": {"message": "请求体必须是 JSON 对象", "type": "invalid_request_error"}},
+            status_code=400,
+        )
     image = body.get("image")
     question = body.get("question", "")
     if not image:
@@ -168,5 +263,11 @@ async def analyze(request: Request):
             status_code=400,
         )
     cfg = _current_config()
-    answer = ask_with_image(img, question or "请描述这张图片", config=cfg)
+    try:
+        answer = ask_with_image(img, question or "请描述这张图片", config=cfg)
+    except ImageError as exc:
+        return JSONResponse(
+            {"error": {"message": str(exc), "type": "invalid_request_error"}},
+            status_code=400,
+        )
     return JSONResponse({"kind": "auto", "text": answer})

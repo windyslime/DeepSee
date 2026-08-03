@@ -61,6 +61,25 @@ for chunk in ask_with_image("photo.jpg", "讲个故事", stream=True):
     print(chunk, end="", flush=True)
 ```
 
+## 安全限制
+
+图片加载对服务化入口(`/v1/chat/completions` 的 `image_url`、`/analyze`)统一生效:
+
+- **SSRF 防护**:http(s) URL 的主机(含每一跳重定向目标)解析到私网、loopback、
+  link-local、保留或特殊用途地址(如 `127.0.0.1`、`169.254.169.254`)时拒绝下载。
+  校验通过后,TCP 连接固定到已校验的 IP(域名只解析一次),消除 DNS rebinding
+  TOCTOU;TLS 仍按原始域名校验证书。下载不读环境代理(`trust_env=False`),
+  防止代理绕过本地校验。RFC 6052 NAT64 前缀(`64:ff9b::/96`、`64:ff9b:1::/48`)
+  显式拒绝;部署网络若使用其他自定义 NAT64 前缀,需自行扩展
+  `deepsee/pipeline/image.py` 的 `_NAT64_NETWORKS`;
+- **本地路径**:服务端只接受 `data:` 与 http(s) URL,`file://` 与本地路径一律拒绝
+  (CLI 本地调用不受影响);
+- **资源上限**:原始图片字节上限 20 MiB、解码像素上限约 1670 万(4096x4096),
+  超限在下载/解码前拒绝;下载请求 `Accept-Encoding: identity` 并拒绝压缩响应,
+  字节上限按原始字节流式累计(扩容前检查),防止大响应与解压炸弹耗尽内存;
+- **请求体上限**:服务端请求体超过 32 MiB 返回 413,请求体流式读取,
+  无 `Content-Length` 的 chunked 请求同样受限。
+
 ## 许可证
 
 MIT
