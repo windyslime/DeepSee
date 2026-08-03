@@ -14,3 +14,6 @@ build/
 # 环境与密钥
 .env
 *.toml.local
+
+# 本地配置文件(含密钥,README 推荐放置)
+deepsee.toml
