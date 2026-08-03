@@ -13,7 +13,7 @@ from typing import Iterable, Iterator, Union
 
 import httpcore
 import httpx
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 from deepsee.errors import ImageError
 
@@ -354,11 +354,21 @@ def load_image(image: ImageInput) -> Image.Image:
 def normalize_image(img: Image.Image) -> tuple[str, str]:
     """Normalize to RGB JPEG, preserving the true input size.
 
-    Only when the long edge exceeds ``PROTECTIVE_MAX_DIMENSION`` (an API hard
-    limit) is the image scaled down. Returns ``(media_type, base64_string)``.
+    Applies EXIF orientation and flattens transparency onto white before
+    converting to RGB (so hidden colors under transparent pixels are not
+    exposed). Only when the long edge exceeds ``PROTECTIVE_MAX_DIMENSION``
+    (an API hard limit) is the image scaled down. Returns
+    ``(media_type, base64_string)``.
     """
-    img = img.copy()
-    if img.mode != "RGB":
+    img = ImageOps.exif_transpose(img.copy())
+    if img.mode in ("RGBA", "LA", "PA") or (
+        img.mode == "P" and "transparency" in img.info
+    ):
+        rgba = img.convert("RGBA")
+        background = Image.new("RGB", rgba.size, (255, 255, 255))
+        background.paste(rgba, mask=rgba.split()[-1])
+        img = background
+    elif img.mode != "RGB":
         img = img.convert("RGB")
     width, height = img.size
     long_edge = max(width, height)

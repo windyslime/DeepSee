@@ -534,3 +534,43 @@ def test_load_url_rejects_invalid_redirect_location(monkeypatch, http_server):
     _allow_local_server(monkeypatch)
     with pytest.raises(ImageError, match="图片下载失败"):
         load_image(f"{http_server}/badloc.jpg")
+
+
+def _exif_bytes(orientation: int) -> bytes:
+    """手工构造最小 EXIF(TIFF IFD0 Orientation 项)。"""
+    ifd = struct.pack("<H", 1)  # 1 个 entry
+    # tag=0x0112 Orientation,type=3 SHORT,count=1,value=orientation(占 4 字节)
+    ifd += struct.pack(
+        "<HHI4s", 0x0112, 3, 1, struct.pack("<H", orientation) + b"\x00\x00"
+    )
+    ifd += struct.pack("<I", 0)  # next IFD 偏移
+    tiff = b"II" + struct.pack("<H", 42) + struct.pack("<I", 8) + ifd
+    return b"Exif\x00\x00" + tiff
+
+
+def test_exif_orientation_applied():
+    img = Image.new("RGB", (100, 50), (10, 20, 30))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", exif=_exif_bytes(6))  # orientation=6: 旋转 90°
+    media_type, b64 = normalize_image(Image.open(io.BytesIO(buf.getvalue())))
+    assert media_type == "image/jpeg"
+    out = Image.open(io.BytesIO(base64.b64decode(b64)))
+    assert out.size == (50, 100)
+
+
+def test_transparent_png_flattened_to_white():
+    # 全透明红色:convert("RGB") 会暴露隐藏红;白底合成后应为白色
+    img = Image.new("RGBA", (10, 10), (255, 0, 0, 0))
+    media_type, b64 = normalize_image(img)
+    assert media_type == "image/jpeg"
+    out = Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGB")
+    assert out.getpixel((0, 0)) == (255, 255, 255)
+
+
+def test_semi_transparent_png_alpha_composited():
+    # 半透明红(alpha=128)在白底上合成 ≈ (255, 127, 127)
+    img = Image.new("RGBA", (10, 10), (255, 0, 0, 128))
+    _, b64 = normalize_image(img)
+    out = Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGB")
+    r, g, b = out.getpixel((0, 0))
+    assert r >= 200 and g <= 150 and b <= 150
