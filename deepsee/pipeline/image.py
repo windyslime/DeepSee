@@ -15,7 +15,9 @@ from deepsee.errors import ImageError
 
 ImageInput = Union[str, os.PathLike, bytes, "Image.Image"]
 
-MAX_DIMENSION = 2048
+# 保护性阈值:仅当长边超过该值时等比缩放(规避各家 API 的硬限制)。
+# 日常截图远低于此,保持真实输入尺寸以保留细节(用户可能只截单个按钮/栏目)。
+PROTECTIVE_MAX_DIMENSION = 8192
 SUPPORTED_FORMATS = ("JPEG", "PNG", "WEBP")
 _HTTP_TIMEOUT = 30.0
 
@@ -59,17 +61,18 @@ def load_image(image: ImageInput) -> Image.Image:
 
 
 def normalize_image(img: Image.Image) -> tuple[str, str]:
-    """Resize (long edge <= MAX_DIMENSION), flatten alpha, re-encode as JPEG.
+    """Normalize to RGB JPEG, preserving the true input size.
 
-    Returns ``(media_type, base64_string)``.
+    Only when the long edge exceeds ``PROTECTIVE_MAX_DIMENSION`` (an API hard
+    limit) is the image scaled down. Returns ``(media_type, base64_string)``.
     """
     img = img.copy()
     if img.mode != "RGB":
         img = img.convert("RGB")
     width, height = img.size
     long_edge = max(width, height)
-    if long_edge > MAX_DIMENSION:
-        scale = MAX_DIMENSION / long_edge
+    if long_edge > PROTECTIVE_MAX_DIMENSION:
+        scale = PROTECTIVE_MAX_DIMENSION / long_edge
         img = img.resize(
             (round(width * scale), round(height * scale)), Image.LANCZOS
         )
