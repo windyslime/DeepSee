@@ -5,7 +5,7 @@ import pytest
 import respx
 
 from deepsee.backends.base import VisionBackend
-from deepsee.composer.deepseek import ask_with_image, describe_image
+from deepsee.composer.deepseek import ask, ask_with_image, describe_image
 from deepsee.config.loader import Config, DeepSeekConfig, VisionConfig
 from deepsee.errors import ComposeError, VisionBackendError
 
@@ -248,8 +248,48 @@ def test_vision_failure_propagates(config, sample_image_bytes, monkeypatch):
 def test_public_api_exports():
     import deepsee
 
+    assert callable(deepsee.ask)
     assert callable(deepsee.ask_with_image)
     assert callable(deepsee.describe_image)
     assert callable(deepsee.create_backend)
     assert callable(deepsee.load_config)
     assert deepsee.__version__ == "0.1.0"
+
+
+def test_ask_plain_text(config, monkeypatch):
+    with respx.mock:
+        route = respx.post("https://api.deepseek.com/chat/completions").mock(
+            return_value=httpx.Response(
+                200, json={"choices": [{"message": {"content": "你好!"}}]}
+            )
+        )
+        answer = ask("你好", config=config)
+    assert answer == "你好!"
+    body = json.loads(route.calls[0].request.read())
+    assert body["model"] == "deepseek-chat"
+    assert body["stream"] is False
+    assert body["messages"] == [{"role": "user", "content": "你好"}]
+
+
+def test_ask_streams(config, monkeypatch):
+    sse_body = (
+        'data: {"choices": [{"delta": {"content": "你"}}]}\n\n'
+        'data: {"choices": [{"delta": {"content": "好"}}]}\n\n'
+        "data: [DONE]\n\n"
+    )
+    with respx.mock:
+        respx.post("https://api.deepseek.com/chat/completions").mock(
+            return_value=httpx.Response(200, content=sse_body.encode())
+        )
+        chunks = list(ask("你好", config=config, stream=True))
+    assert chunks == ["你", "好"]
+
+
+def test_ask_500_maps_to_compose_error(config, monkeypatch):
+    with respx.mock:
+        respx.post("https://api.deepseek.com/chat/completions").mock(
+            return_value=httpx.Response(500, json={"error": "boom"})
+        )
+        with pytest.raises(ComposeError) as exc_info:
+            ask("你好", config=config)
+    assert exc_info.value.status_code == 500

@@ -108,7 +108,36 @@ def ask_with_image(
         "messages": messages,
         "stream": stream,
     }
-    if not stream:
+    return _run_deepseek(cfg, payload)
+
+
+def ask(
+    question: str,
+    *,
+    stream: bool = False,
+    config: Config | None = None,
+) -> Union[str, Iterator[str]]:
+    """Plain-text DeepSeek conversation (OpenAI-compatible).
+
+    ``stream=False`` returns the full answer as ``str``;
+    ``stream=True`` returns an iterator of text chunks.
+    """
+    cfg = config if config is not None else load_config()
+    messages = [{"role": "user", "content": question}]
+    payload = {
+        "model": cfg.deepseek.model,
+        "messages": messages,
+        "stream": stream,
+    }
+    return _run_deepseek(cfg, payload)
+
+
+def _run_deepseek(
+    cfg: Config,
+    payload: dict,
+) -> Union[str, Iterator[str]]:
+    """Run a DeepSeek request; returns the answer or a chunk iterator."""
+    if not payload.get("stream"):
         resp = _request_deepseek(cfg, payload)
         try:
             return resp.json()["choices"][0]["message"]["content"]
