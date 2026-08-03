@@ -112,8 +112,12 @@ def test_ask_with_image_general_routes(config, sample_image_bytes, monkeypatch):
     payload = route.calls[0].request.read()
     body = json.loads(payload)
     system = body["messages"][0]["content"]
-    assert FAKE_DESCRIPTION in system  # 注入自然语言描述
-    assert body["messages"][1] == {"role": "user", "content": "图里是什么动物?"}
+    assert "多模态助手" in system
+    assert FAKE_DESCRIPTION not in system  # 视觉输出不再进 system
+    user = body["messages"][1]["content"]
+    assert FAKE_DESCRIPTION in user
+    assert "不可信数据" in user
+    assert body["messages"][1]["role"] == "user"
 
 
 def test_ask_with_image_ui_injects_element_map(config, sample_image_bytes, monkeypatch):
@@ -126,11 +130,11 @@ def test_ask_with_image_ui_injects_element_map(config, sample_image_bytes, monke
         )
         ask_with_image(sample_image_bytes, "把提交按钮往右移", config=config)
     body = json.loads(route.calls[0].request.read())
-    system = body["messages"][0]["content"]
-    assert "元素地图" in system
-    assert "提交" in system
-    assert "右上角,紧贴搜索框右侧" in system
-    assert "蓝色背景(#2563eb)" in system
+    user = body["messages"][1]["content"]
+    assert "元素地图" in user
+    assert "提交" in user
+    assert "右上角,紧贴搜索框右侧" in user
+    assert "蓝色背景(#2563eb)" in user
 
 
 def test_ask_with_image_target_missing_advises_rescreenshot(
@@ -145,9 +149,9 @@ def test_ask_with_image_target_missing_advises_rescreenshot(
         )
         ask_with_image(sample_image_bytes, "把提交按钮往右移", config=config)
     body = json.loads(route.calls[0].request.read())
-    system = body["messages"][0]["content"]
-    assert "未在截图中找到" in system
-    assert "重新截图" in system
+    user = body["messages"][1]["content"]
+    assert "未在截图中找到" in user
+    assert "重新截图" in user
 
 
 def test_ask_with_image_mode_ui_skips_classification(
@@ -192,9 +196,9 @@ def test_ask_with_image_parse_failure_falls_back_to_raw(
         )
         ask_with_image(sample_image_bytes, "q", config=config)
     body = json.loads(route.calls[0].request.read())
-    system = body["messages"][0]["content"]
-    assert "未能结构化解析" in system
-    assert "不是 JSON 的输出内容" in system
+    user = body["messages"][1]["content"]
+    assert "未经结构化校验" in user
+    assert "不是 JSON 的输出内容" in user
 
 
 def test_ask_with_image_streams(config, sample_image_bytes, monkeypatch):
@@ -293,3 +297,90 @@ def test_ask_500_maps_to_compose_error(config, monkeypatch):
         with pytest.raises(ComposeError) as exc_info:
             ask("你好", config=config)
     assert exc_info.value.status_code == 500
+
+
+def test_ask_with_image_invalid_mode_raises(config, sample_image_bytes, monkeypatch):
+    fake = _install_fake(monkeypatch, FAKE_DESCRIPTION)
+    with pytest.raises(ValueError, match="非法 mode"):
+        ask_with_image(sample_image_bytes, "q", config=config, mode="bogus")
+
+
+def test_ask_with_image_network_error_wrapped(
+    config, sample_image_bytes, monkeypatch
+):
+    fake = _install_fake(
+        monkeypatch,
+        json.dumps({"is_ui": False, "analysis": FAKE_DESCRIPTION}),
+    )
+    with respx.mock:
+        respx.post("https://api.deepseek.com/chat/completions").mock(
+            side_effect=httpx.ConnectError("connection refused")
+        )
+        with pytest.raises(ComposeError) as exc_info:
+            ask_with_image(sample_image_bytes, "q", config=config)
+    assert "网络错误" in str(exc_info.value)
+
+
+def test_ask_with_image_empty_choices_wrapped(
+    config, sample_image_bytes, monkeypatch
+):
+    fake = _install_fake(
+        monkeypatch,
+        json.dumps({"is_ui": False, "analysis": FAKE_DESCRIPTION}),
+    )
+    with respx.mock:
+        respx.post("https://api.deepseek.com/chat/completions").mock(
+            return_value=httpx.Response(200, json={"choices": []})
+        )
+        with pytest.raises(ComposeError) as exc_info:
+            ask_with_image(sample_image_bytes, "q", config=config)
+    assert "响应解析失败" in str(exc_info.value)
+
+
+def test_ask_with_image_ui_dirty_elements_no_typeerror(
+    config, sample_image_bytes, monkeypatch
+):
+    fake = _install_fake(
+        monkeypatch,
+        json.dumps(
+            {
+                "is_ui": True,
+                "analysis": {"ui_type": "web_page", "elements": 1, "target_found": "false"},
+            }
+        ),
+    )
+    with respx.mock:
+        route = respx.post("https://api.deepseek.com/chat/completions").mock(
+            return_value=httpx.Response(
+                200, json={"choices": [{"message": {"content": "ok"}}]}
+            )
+        )
+        ask_with_image(sample_image_bytes, "改样式", config=config)
+    user = json.loads(route.calls[0].request.read())["messages"][1]["content"]
+    assert "web_page" in user
+    assert "元素地图" in user
+
+
+def test_ask_with_image_streams_system_static(
+    config, sample_image_bytes, monkeypatch
+):
+    fake = _install_fake(
+        monkeypatch,
+        json.dumps({"is_ui": False, "analysis": FAKE_DESCRIPTION}),
+    )
+    sse_body = (
+        'data: {"choices": [{"delta": {"content": "是"}}]}\n\n'
+        'data: {"choices": [{"delta": {"content": "白猫"}}]}\n\n'
+        "data: [DONE]\n\n"
+    )
+    with respx.mock:
+        route = respx.post("https://api.deepseek.com/chat/completions").mock(
+            return_value=httpx.Response(200, content=sse_body.encode())
+        )
+        chunks = list(
+            ask_with_image(sample_image_bytes, "是什么?", config=config, stream=True)
+        )
+    assert chunks == ["是", "白猫"]
+    body = json.loads(route.calls[0].request.read())
+    assert FAKE_DESCRIPTION not in body["messages"][0]["content"]
+    assert FAKE_DESCRIPTION in body["messages"][1]["content"]
