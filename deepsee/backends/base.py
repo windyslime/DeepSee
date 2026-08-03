@@ -58,3 +58,35 @@ def retry_request(
         response.raise_for_status()
         return response
     raise AssertionError("unreachable")  # pragma: no cover
+
+
+def stream_request(
+    client: httpx.Client,
+    method: str,
+    url: str,
+    *,
+    retries: int = 2,
+    **kwargs,
+) -> httpx.Response:
+    """Send a streaming request, retrying 429/5xx before body consumption.
+
+    ``client.send(req, stream=True)`` returns once response headers arrive;
+    the body is read lazily by the caller via ``iter_lines()``/``iter_bytes()``,
+    so the first yielded chunk does not wait for the full response.
+    Failed responses are closed before retry/raise so connections are not
+    leaked.
+    """
+    for attempt in range(retries + 1):
+        req = client.build_request(method, url, **kwargs)
+        resp = client.send(req, stream=True)
+        code = resp.status_code
+        if code == 429 or code >= 500:
+            resp.close()
+            if attempt < retries:
+                time.sleep(_RETRY_BACKOFF_BASE * (2**attempt))
+                continue
+        if code >= 400:
+            resp.close()
+            resp.raise_for_status()  # HTTPStatusError,carries status_code
+        return resp
+    raise AssertionError("unreachable")  # pragma: no cover
