@@ -479,3 +479,42 @@ def test_no_backend_override_expands_toml_placeholder_as_switch(tmp_path):
     env = {"OLD_BACKEND": "anthropic"}
     with pytest.raises(ConfigError, match="VISION_API_KEY"):
         load_config(path=toml, env=env)
+
+def _minimal_env() -> dict:
+    return {
+        "DEEPSEEK_API_KEY": "sk-ds-1",
+        "VISION_API_KEY": "sk-v-1",
+        "VISION_BASE_URL": "https://vision.example.com/v1",
+        "VISION_MODEL": "qwen-vl-max",
+    }
+
+
+def test_retries_env_invalid_raises_config_error():
+    env = _minimal_env()
+    env["RETRIES"] = "abc"
+    with pytest.raises(ConfigError, match="retries 必须是整数"):
+        load_config(env=env)
+
+
+def test_retries_env_negative_raises_config_error():
+    env = _minimal_env()
+    env["RETRIES"] = "-1"
+    with pytest.raises(ConfigError, match="不能为负数"):
+        load_config(env=env)
+
+
+def test_retries_toml_negative_raises_config_error(tmp_path):
+    toml = tmp_path / "deepsee.toml"
+    toml.write_text(
+        "[deepseek]\n"
+        'api_key = "${DS_KEY}"\n'
+        "retries = -3\n"
+        "[vision]\n"
+        'backend = "openai_compatible"\n'
+        'api_key = "${VS_KEY}"\n'
+        'model = "qwen-vl-max"\n'
+        'base_url = "https://vision.example.com/v1"\n'
+    )
+    env = {"DS_KEY": "sk-ds-1", "VS_KEY": "sk-v-1"}
+    with pytest.raises(ConfigError, match="不能为负数"):
+        load_config(path=toml, env=env)

@@ -141,6 +141,8 @@ def load_config(
         retries = int(retries_toml)
     except (TypeError, ValueError):
         raise ConfigError(f"retries 必须是整数,当前: {retries_toml!r}")
+    if retries < 0:
+        raise ConfigError(f"retries 不能为负数,当前: {retries}")
 
     vision_backend_raw = toml_raw_str("vision", "backend", "openai_compatible")
 
@@ -223,7 +225,13 @@ def load_config(
         model=vision_model,
         base_url=env_val("VISION_BASE_URL", vision_base_url) or None,
     )
-    retries = int(env_val("RETRIES", str(retries)))
+    retries_raw = env_val("RETRIES", str(retries))
+    try:
+        retries = int(retries_raw)
+    except (TypeError, ValueError):
+        raise ConfigError(f"retries 必须是整数,当前: {retries_raw!r}")
+    if retries < 0:
+        raise ConfigError(f"retries 不能为负数,当前: {retries}")
 
     _validate(deepseek, vision)
     return Config(deepseek=deepseek, vision=vision, retries=retries)
