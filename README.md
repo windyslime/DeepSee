@@ -6,8 +6,11 @@
 ## 安装
 
 ```bash
-pip install deepsee
+pip install seedeep
 ```
+
+> PyPI 上的 `deepsee` 已被 2014 年的无关项目占用,本包发布名为 `seedeep`;
+> import 包名仍是 `deepsee`。启动本地服务时用 `pip install "seedeep[server]"`。
 
 ## 快速开始
 
