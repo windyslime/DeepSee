@@ -41,8 +41,12 @@ model = "qwen-vl-max"
 会被发给错误的主机/供应商)。`base_url` 回落到新后端的官方默认主机 ——
 Anthropic 和 Gemini 有默认主机;OpenAI-compatible 没有默认值,必须显式设置
 `VISION_BASE_URL`。`api_key` 与 `model` 必须由环境变量显式提供,否则报错。
-环境变量与 TOML 中相同的 `VISION_BACKEND` 不算切换,TOML 配置原样保留
-(自定义代理 / 审计 / 数据驻留场景)。
+环境变量与 TOML 中**字面量** `backend` 相同的 `VISION_BACKEND` 不算切换,
+TOML 配置原样保留(自定义代理 / 审计 / 数据驻留场景)。但 TOML `backend`
+若写成 `${ENV}` 插值(如 `backend = "${VISION_BACKEND}"`),一律视为切换:
+`base_url` 回落默认,且 `api_key` / `model` 必须使用标准环境变量
+`VISION_API_KEY` / `VISION_MODEL` 显式提供 —— TOML 中的自定义 `${ENV}`
+占位符不会生效,旧变量可安全删除。
 
 ## 支持的后端
 

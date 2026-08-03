@@ -138,7 +138,6 @@ def load_config(
         raise ConfigError(f"retries 必须是整数,当前: {retries_toml!r}")
 
     vision_backend_raw = toml_raw_str("vision", "backend", "openai_compatible")
-    vision_backend_toml = toml_str("vision", "backend", "openai_compatible")
 
     # Environment overrides (highest priority).
     # Accept both the prefixed form (DeepSee_DEEPSEEK_API_KEY) and the bare
@@ -152,25 +151,37 @@ def load_config(
     def env_has(section_key: str) -> bool:
         return f"{ENV_PREFIX}{section_key}" in env or section_key in env
 
-    # backend + base_url + api_key + model 是一个配置束。backend 被环境变量
-    # 异值切换时,旧 TOML 的三项一律不得继承:
+    # backend + base_url + api_key + model 是一个配置束。backend 被切换时,
+    # 旧 TOML 的三项一律不得继承:
     # - base_url:仍指向旧 backend 的主机,沿用会把新 backend 的 API key 发送
     #   到错误主机;切换时丢弃,回落到新 backend 的官方默认主机(用户仍可用
     #   VISION_BASE_URL 显式覆盖)。
     # - api_key / model:属于旧供应商,不得继承;新 backend 必须由环境变量
     #   显式提供,否则抛 ConfigError,而不是静默把旧供应商密钥发给新供应商。
-    # 环境变量与 TOML 同值(如 VISION_BACKEND=anthropic 且 TOML 也是
-    # anthropic)不算切换,TOML 配置原样保留 —— 自定义代理/审计/数据驻留
-    # 场景依赖这一行为。
-    vision_backend = env_val("VISION_BACKEND", vision_backend_toml)
+    # 切换判定:
+    # - TOML backend 为字面量且与环境 VISION_BACKEND 同值 → 未切换,TOML
+    #   配置原样保留(自定义代理/审计/数据驻留场景依赖这一行为);
+    # - TOML backend 为 ${ENV} 插值 → 一律按切换处理(展开后与 env_val 的
+    #   结果必然同值,按值比较会误判"未切换"而保留旧 base_url);
+    # - 其余值异变 → 切换。
+    # 解析顺序:环境显式覆盖 VISION_BACKEND 时,TOML backend 完全无需展开
+    # —— 它可能是引用已删除变量的 ${ENV} 占位符,提前展开会在新配置已完整
+    # 时仍报错;仅在没有环境覆盖时才展开 TOML backend(其引用的环境变量缺失
+    # 时报错是合理的)。
+    backend_env_value = env.get(f"{ENV_PREFIX}VISION_BACKEND")
+    if backend_env_value is None:
+        backend_env_value = env.get("VISION_BACKEND")
+    if backend_env_value is not None:
+        vision_backend = backend_env_value
+        vision_backend_toml = vision_backend_raw
+    else:
+        vision_backend_toml = toml_str("vision", "backend", "openai_compatible")
+        vision_backend = vision_backend_toml
     if vision_backend not in VALID_BACKENDS:
         raise ConfigError(
             f"vision.backend 非法: {vision_backend!r};"
             f"可选值: {', '.join(VALID_BACKENDS)}"
         )
-    # TOML 若用 ${ENV} 引用 backend(如 backend = "${VISION_BACKEND}"),
-    # 展开后与 env_val 的结果必然同值,按值比较会误判为"未切换"而保留
-    # 旧 base_url —— 环境插值得到的 backend 一律按切换处理。
     backend_env_driven = vision_backend_raw.startswith("${") and vision_backend_raw.endswith("}")
     backend_switched = backend_env_driven or vision_backend != vision_backend_toml
     vision_base_url_toml = "" if backend_switched else toml_str("vision", "base_url", "")

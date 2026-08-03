@@ -436,3 +436,46 @@ def test_env_backend_switch_invalid_backend_reported_first(tmp_path):
     env = {"VISION_BACKEND": "bogus"}
     with pytest.raises(ConfigError, match="backend"):
         load_config(path=toml, env=env)
+
+
+def test_env_backend_override_skips_old_backend_placeholder(tmp_path):
+    """P2: an explicit VISION_BACKEND override must not expand the stale
+    TOML backend placeholder (it may reference a removed variable)."""
+    toml = tmp_path / "deepsee.toml"
+    toml.write_text(
+        "[deepseek]\n"
+        'api_key = "sk-ds-1"\n'
+        "[vision]\n"
+        'backend = "${OLD_BACKEND}"\n'
+        'api_key = "sk-old-provider"\n'
+        'model = "qwen-vl"\n'
+        'base_url = "https://old-vision.example.com/v1"\n'
+    )
+    env = {
+        "VISION_BACKEND": "anthropic",
+        "VISION_API_KEY": "sk-anthropic-new",
+        "VISION_MODEL": "claude-sonnet-4-5",
+    }
+    cfg = load_config(path=toml, env=env)
+    assert cfg.vision.backend == "anthropic"
+    assert cfg.vision.base_url == "https://api.anthropic.com"
+    assert cfg.vision.api_key == "sk-anthropic-new"
+    assert cfg.vision.model == "claude-sonnet-4-5"
+
+
+def test_no_backend_override_expands_toml_placeholder_as_switch(tmp_path):
+    """Without an override, a ${ENV} TOML backend expands and still counts
+    as a switch: the old TOML key/model are not inherited."""
+    toml = tmp_path / "deepsee.toml"
+    toml.write_text(
+        "[deepseek]\n"
+        'api_key = "sk-ds-1"\n'
+        "[vision]\n"
+        'backend = "${OLD_BACKEND}"\n'
+        'api_key = "sk-old-provider"\n'
+        'model = "qwen-vl"\n'
+        'base_url = "https://old-vision.example.com/v1"\n'
+    )
+    env = {"OLD_BACKEND": "anthropic"}
+    with pytest.raises(ConfigError, match="VISION_API_KEY"):
+        load_config(path=toml, env=env)
