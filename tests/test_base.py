@@ -91,3 +91,116 @@ def test_stream_request_5xx_exhausted_raises_http_status_error():
             with pytest.raises(httpx.HTTPStatusError) as exc_info:
                 stream_request(client, "POST", "https://example.com/api", retries=0)
     assert exc_info.value.response.status_code == 500
+
+
+import asyncio
+
+from deepsee.backends.base import retry_request_async, stream_request_async
+
+
+class _AsyncBodyStream(httpx.AsyncByteStream):
+    """记录读取时机的异步流式正文。"""
+
+    def __init__(self, events: list[str], chunks: list[bytes]):
+        self._events = events
+        self._chunks = chunks
+
+    async def __aiter__(self):
+        for i, chunk in enumerate(self._chunks):
+            self._events.append(f"chunk-{i}")
+            yield chunk
+
+    async def aclose(self) -> None:
+        pass
+
+
+def test_async_stream_request_lazy_body():
+    events: list[str] = []
+
+    async def handler(request):
+        events.append("headers")
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/event-stream"},
+            stream=_AsyncBodyStream(
+                events,
+                [
+                    b'data: {"choices": [{"delta": {"content": "a"}}]}\n\n',
+                    b"data: [DONE]\n\n",
+                ],
+            ),
+        )
+
+    async def run():
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        resp = await stream_request_async(
+            client, "POST", "https://example.com/api", retries=0
+        )
+        assert events == ["headers"]  # 正文尚未被读取
+        lines = []
+        async for line in resp.aiter_lines():
+            lines.append(line)
+        await client.aclose()
+        return lines
+
+    lines = asyncio.run(run())
+    assert lines[0] == 'data: {"choices": [{"delta": {"content": "a"}}]}'
+    assert events == ["headers", "chunk-0", "chunk-1"]  # 逐块读取
+
+
+def test_async_stream_request_retries_5xx_before_body():
+    async def run():
+        async with respx.mock:
+            route = respx.post("https://example.com/api").mock(
+                side_effect=[
+                    httpx.Response(500, content=b"boom"),
+                    httpx.Response(200, content=b"data: [DONE]\n\n"),
+                ]
+            )
+            async with httpx.AsyncClient() as client:
+                resp = await stream_request_async(
+                    client, "POST", "https://example.com/api", retries=2
+                )
+                lines = [line async for line in resp.aiter_lines()]
+            return route, lines
+
+    route, lines = asyncio.run(run())
+    assert [l for l in lines if l] == ["data: [DONE]"]
+    assert len(route.calls) == 2
+
+
+def test_async_retry_request_429_then_succeeds():
+    async def run():
+        async with respx.mock:
+            route = respx.post("https://example.com/api").mock(
+                side_effect=[
+                    httpx.Response(429, content=b"slow down"),
+                    httpx.Response(200, json={"ok": True}),
+                ]
+            )
+            async with httpx.AsyncClient() as client:
+                resp = await retry_request_async(
+                    client, "POST", "https://example.com/api", retries=2
+                )
+            return route, resp.json()
+
+    route, data = asyncio.run(run())
+    assert data == {"ok": True}
+    assert len(route.calls) == 2
+
+
+def test_async_retry_request_5xx_exhausted_raises():
+    async def run():
+        async with respx.mock:
+            respx.post("https://example.com/api").mock(
+                return_value=httpx.Response(500, content=b"boom")
+            )
+            async with httpx.AsyncClient() as client:
+                try:
+                    await retry_request_async(
+                        client, "POST", "https://example.com/api", retries=0
+                    )
+                except httpx.HTTPStatusError as exc:
+                    return exc.response.status_code
+
+    assert asyncio.run(run()) == 500

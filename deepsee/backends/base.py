@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from abc import ABC, abstractmethod
 
@@ -27,6 +28,7 @@ class VisionBackend(ABC):
         self.base_url = base_url
         self.retries = retries
         self._client = httpx.Client(timeout=60.0)
+        self._async_client = httpx.AsyncClient(timeout=60.0)
 
     @abstractmethod
     def describe(self, image: ImageInput, prompt: str, **opts) -> str:
@@ -34,6 +36,7 @@ class VisionBackend(ABC):
 
     def close(self) -> None:
         self._client.close()
+        self._async_client.close()
 
 
 def retry_request(
@@ -88,5 +91,51 @@ def stream_request(
         if code >= 400:
             resp.close()
             resp.raise_for_status()  # HTTPStatusError,carries status_code
+        return resp
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
+async def retry_request_async(
+    client: httpx.AsyncClient,
+    method: str,
+    url: str,
+    *,
+    retries: int = 2,
+    **kwargs,
+) -> httpx.Response:
+    """Async equivalent of ``retry_request`` (asyncio.sleep backoff)."""
+    for attempt in range(retries + 1):
+        response = await client.request(method, url, **kwargs)
+        code = response.status_code
+        if code == 429 or code >= 500:
+            if attempt < retries:
+                await asyncio.sleep(_RETRY_BACKOFF_BASE * (2**attempt))
+                continue
+        response.raise_for_status()
+        return response
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
+async def stream_request_async(
+    client: httpx.AsyncClient,
+    method: str,
+    url: str,
+    *,
+    retries: int = 2,
+    **kwargs,
+) -> httpx.Response:
+    """Async equivalent of ``stream_request`` (lazy body via ``aiter_lines``)."""
+    for attempt in range(retries + 1):
+        req = client.build_request(method, url, **kwargs)
+        resp = await client.send(req, stream=True)
+        code = resp.status_code
+        if code == 429 or code >= 500:
+            await resp.aclose()
+            if attempt < retries:
+                await asyncio.sleep(_RETRY_BACKOFF_BASE * (2**attempt))
+                continue
+        if code >= 400:
+            await resp.aclose()
+            resp.raise_for_status()
         return resp
     raise AssertionError("unreachable")  # pragma: no cover
