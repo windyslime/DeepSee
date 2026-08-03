@@ -8,7 +8,14 @@ Quickstart::
 
 from deepsee.backends import create_backend
 from deepsee.backends.base import VisionBackend
-from deepsee.composer.deepseek import ask, ask_with_image, describe_image
+from deepsee.composer.deepseek import (
+    ask,
+    ask_async,
+    ask_with_image,
+    ask_with_image_async,
+    describe_image,
+    describe_image_async,
+)
 from deepsee.config.loader import Config, DeepSeekConfig, VisionConfig, load_config
 from deepsee.errors import (
     ComposeError,
@@ -22,8 +29,11 @@ __version__ = "0.1.0"
 
 __all__ = [
     "ask",
+    "ask_async",
     "ask_with_image",
+    "ask_with_image_async",
     "describe_image",
+    "describe_image_async",
     "create_backend",
     "VisionBackend",
     "load_config",

@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import httpx
@@ -5,7 +6,14 @@ import pytest
 import respx
 
 from deepsee.backends.base import VisionBackend
-from deepsee.composer.deepseek import ask, ask_with_image, describe_image
+from deepsee.composer.deepseek import (
+    ask,
+    ask_async,
+    ask_with_image,
+    ask_with_image_async,
+    describe_image,
+    describe_image_async,
+)
 from deepsee.config.loader import Config, DeepSeekConfig, VisionConfig
 from deepsee.errors import ComposeError, VisionBackendError
 
@@ -57,6 +65,10 @@ class FakeBackend(VisionBackend):
         self.reply = FAKE_DESCRIPTION
 
     def describe(self, image, prompt, **opts):
+        self.calls.append((image, prompt))
+        return self.reply
+
+    async def describe_async(self, image, prompt, **opts):
         self.calls.append((image, prompt))
         return self.reply
 
@@ -384,3 +396,108 @@ def test_ask_with_image_streams_system_static(
     body = json.loads(route.calls[0].request.read())
     assert FAKE_DESCRIPTION not in body["messages"][0]["content"]
     assert FAKE_DESCRIPTION in body["messages"][1]["content"]
+
+
+def test_ask_with_image_async_non_stream(config, sample_image_bytes, monkeypatch):
+    fake = _install_fake(
+        monkeypatch,
+        json.dumps({"is_ui": False, "analysis": FAKE_DESCRIPTION}),
+    )
+
+    async def _run():
+        async with respx.mock:
+            route = respx.post("https://api.deepseek.com/chat/completions").mock(
+                return_value=httpx.Response(
+                    200, json={"choices": [{"message": {"content": "是一只白猫。"}}]}
+                )
+            )
+            answer = await ask_with_image_async(
+                sample_image_bytes, "图里是什么动物?", config=config
+            )
+            return route, answer
+
+    route, answer = asyncio.run(_run())
+    assert answer == "是一只白猫。"
+    body = json.loads(route.calls[0].request.content)
+    assert FAKE_DESCRIPTION not in body["messages"][0]["content"]
+    assert FAKE_DESCRIPTION in body["messages"][1]["content"]
+
+
+def test_ask_with_image_async_stream(config, sample_image_bytes, monkeypatch):
+    fake = _install_fake(
+        monkeypatch,
+        json.dumps({"is_ui": False, "analysis": FAKE_DESCRIPTION}),
+    )
+    sse_body = (
+        'data: {"choices": [{"delta": {"content": "是"}}]}\n\n'
+        'data: {"choices": [{"delta": {"content": "白猫"}}]}\n\n'
+        "data: [DONE]\n\n"
+    )
+
+    async def _run():
+        async with respx.mock:
+            route = respx.post("https://api.deepseek.com/chat/completions").mock(
+                return_value=httpx.Response(200, content=sse_body.encode())
+            )
+            chunks = []
+            async for chunk in await ask_with_image_async(
+                sample_image_bytes, "是什么?", config=config, stream=True
+            ):
+                chunks.append(chunk)
+            return route, chunks
+
+    route, chunks = asyncio.run(_run())
+    assert chunks == ["是", "白猫"]
+    assert json.loads(route.calls[0].request.content)["stream"] is True
+
+
+def test_ask_async_plain(config, monkeypatch):
+    async def _run():
+        async with respx.mock:
+            route = respx.post("https://api.deepseek.com/chat/completions").mock(
+                return_value=httpx.Response(
+                    200, json={"choices": [{"message": {"content": "你好!"}}]}
+                )
+            )
+            answer = await ask_async("你好", config=config)
+            return route, answer
+
+    route, answer = asyncio.run(_run())
+    assert answer == "你好!"
+    body = json.loads(route.calls[0].request.content)
+    assert body["messages"] == [{"role": "user", "content": "你好"}]
+
+
+def test_describe_image_async_uses_backend(config, sample_image_bytes, monkeypatch):
+    fake = _install_fake(monkeypatch, FAKE_DESCRIPTION)
+    result = asyncio.run(
+        describe_image_async(sample_image_bytes, "有什么?", config=config)
+    )
+    assert result == FAKE_DESCRIPTION
+    assert fake.calls[0][1] == "有什么?"
+
+
+def test_ask_with_image_async_invalid_mode(config, sample_image_bytes, monkeypatch):
+    fake = _install_fake(monkeypatch, FAKE_DESCRIPTION)
+    with pytest.raises(ValueError, match="非法 mode"):
+        asyncio.run(
+            ask_with_image_async(sample_image_bytes, "q", config=config, mode="bogus")
+        )
+
+
+def test_ask_with_image_async_network_error(config, sample_image_bytes, monkeypatch):
+    fake = _install_fake(
+        monkeypatch,
+        json.dumps({"is_ui": False, "analysis": FAKE_DESCRIPTION}),
+    )
+
+    async def _run():
+        async with respx.mock:
+            respx.post("https://api.deepseek.com/chat/completions").mock(
+                side_effect=httpx.ConnectError("connection refused")
+            )
+            await ask_with_image_async(sample_image_bytes, "q", config=config)
+
+    with pytest.raises(ComposeError) as exc_info:
+        asyncio.run(_run())
+    assert "网络错误" in str(exc_info.value)
