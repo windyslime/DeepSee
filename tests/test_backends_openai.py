@@ -143,3 +143,43 @@ def test_empty_choices_wrapped(sample_image_bytes):
         with pytest.raises(VisionBackendError) as exc_info:
             backend.describe(sample_image_bytes, "p")
     assert "响应解析失败" in str(exc_info.value)
+
+
+import asyncio
+
+
+def test_describe_async_request_shape(sample_image_bytes):
+    backend = make_backend()
+
+    async def _run():
+        async with respx.mock:
+            route = respx.post("https://vision.example.com/v1/chat/completions").mock(
+                return_value=httpx.Response(
+                    200, json={"choices": [{"message": {"content": "一只红色的猫"}}]}
+                )
+            )
+            result = await backend.describe_async(sample_image_bytes, "图里有什么?")
+            return route, result
+
+    route, result = asyncio.run(_run())
+    assert result == "一只红色的猫"
+    payload = json.loads(route.calls[0].request.content)
+    assert payload["model"] == "qwen-vl-max"
+    assert payload["messages"][0]["content"][0]["type"] == "image_url"
+    backend.close()
+
+
+def test_describe_async_connect_error_wrapped(sample_image_bytes):
+    backend = make_backend(retries=0)
+
+    async def _run():
+        async with respx.mock:
+            respx.post("https://vision.example.com/v1/chat/completions").mock(
+                side_effect=httpx.ConnectError("connection refused")
+            )
+            await backend.describe_async(sample_image_bytes, "p")
+
+    with pytest.raises(VisionBackendError) as exc_info:
+        asyncio.run(_run())
+    assert "网络错误" in str(exc_info.value)
+    backend.close()

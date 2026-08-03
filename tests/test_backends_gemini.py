@@ -93,3 +93,45 @@ def test_empty_candidates_wrapped(sample_image_bytes):
         with pytest.raises(VisionBackendError) as exc_info:
             backend.describe(sample_image_bytes, "p")
     assert "响应解析失败" in str(exc_info.value)
+
+
+import asyncio
+
+
+def test_describe_async_request_shape(sample_image_bytes):
+    backend = make_backend()
+
+    async def _run():
+        async with respx.mock:
+            route = respx.post(
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+            ).mock(
+                return_value=httpx.Response(
+                    200,
+                    json={"candidates": [{"content": {"parts": [{"text": "这是一张截图"}]}}]},
+                )
+            )
+            result = await backend.describe_async(sample_image_bytes, "这是什么?")
+            return route, result
+
+    route, result = asyncio.run(_run())
+    assert result == "这是一张截图"
+    payload = json.loads(route.calls[0].request.content)
+    assert payload["contents"][0]["parts"][0]["inline_data"]["mime_type"] == "image/jpeg"
+    backend.close()
+
+
+def test_describe_async_connect_error_wrapped(sample_image_bytes):
+    backend = make_backend(retries=0)
+
+    async def _run():
+        async with respx.mock:
+            respx.post(
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+            ).mock(side_effect=httpx.ConnectError("connection refused"))
+            await backend.describe_async(sample_image_bytes, "p")
+
+    with pytest.raises(VisionBackendError) as exc_info:
+        asyncio.run(_run())
+    assert "网络错误" in str(exc_info.value)
+    backend.close()

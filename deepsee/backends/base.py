@@ -28,7 +28,14 @@ class VisionBackend(ABC):
         self.base_url = base_url
         self.retries = retries
         self._client = httpx.Client(timeout=60.0)
-        self._async_client = httpx.AsyncClient(timeout=60.0)
+        self._async_client: httpx.AsyncClient | None = None
+
+    @property
+    def async_client(self) -> httpx.AsyncClient:
+        """Lazily-created async client (sync paths never allocate one)."""
+        if self._async_client is None:
+            self._async_client = httpx.AsyncClient(timeout=60.0)
+        return self._async_client
 
     @abstractmethod
     def describe(self, image: ImageInput, prompt: str, **opts) -> str:
@@ -36,7 +43,11 @@ class VisionBackend(ABC):
 
     def close(self) -> None:
         self._client.close()
-        self._async_client.close()
+
+    async def aclose(self) -> None:
+        self._client.close()
+        if self._async_client is not None:
+            await self._async_client.aclose()
 
 
 def retry_request(
