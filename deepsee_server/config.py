@@ -6,7 +6,12 @@ Priority: environment variables > deepsee.toml [server] section > defaults.
 from __future__ import annotations
 
 import os
-import tomllib
+
+try:  # Python >= 3.11
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10: use the official backport
+    import tomli as tomllib  # type: ignore[no-redef]
+
 from dataclasses import dataclass
 from pathlib import Path
 
