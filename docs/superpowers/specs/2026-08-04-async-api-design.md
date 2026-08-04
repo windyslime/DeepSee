@@ -35,8 +35,9 @@ async def ask_with_image_async(image, question, *, stream=False, config=None, mo
 
 ### 2. 后端异步化(`deepsee/backends/base.py` + 3 个 backend)
 
-- `VisionBackend.__init__` 同时持有 `self._client`(同步)与 `self._async_client`
-  (异步);`close()` 关闭两者(AsyncClient 懒连接,未用时关闭成本为零);
+- `VisionBackend.__init__` 持有同步 `self._client`;异步 client 由 `async_client`
+  属性**懒创建**(同步路径不分配)。`close()` 只关闭同步 client,`aclose()` 关闭
+  两者——async 路径必须用 `aclose()`(需在对应事件循环中运行);
 - 三个后端各实现 `async def describe_async(self, image, prompt, **opts) -> str`,
   与 `describe` 共享 payload/headers 构造(提取为私有方法);
   请求用 `await client.send(...)`,异常包装三段分支与同步版相同

@@ -45,9 +45,16 @@ class VisionBackend(ABC):
         """Describe the image given a prompt. Returns plain text."""
 
     def close(self) -> None:
+        """Close the synchronous client.
+
+        Async resources are released by ``aclose()``, which must run in the
+        event loop that used them. The async client is lazily created, so
+        pure sync paths never allocate it and leak nothing here.
+        """
         self._client.close()
 
     async def aclose(self) -> None:
+        """Close both sync and async clients (async-path teardown)."""
         self._client.close()
         if self._async_client is not None:
             await self._async_client.aclose()

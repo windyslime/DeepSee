@@ -256,3 +256,21 @@ def test_async_client_ignores_socks_proxy_env(monkeypatch, sample_image_bytes):
 
     assert asyncio.run(run()) == "ok"
     backend.close()
+
+
+def test_sync_path_never_allocates_async_client(sample_image_bytes):
+    """同步 describe 不应创建 AsyncClient(懒创建,避免 sync 路径残留 async 资源)。"""
+    from deepsee.backends.openai_compat import OpenAICompatibleBackend
+
+    backend = OpenAICompatibleBackend(
+        api_key="k", model="m", base_url="https://vision.example.com/v1", retries=0
+    )
+    with respx.mock:
+        respx.post("https://vision.example.com/v1/chat/completions").mock(
+            return_value=httpx.Response(
+                200, json={"choices": [{"message": {"content": "ok"}}]}
+            )
+        )
+        assert backend.describe(sample_image_bytes, "p") == "ok"
+    assert backend._async_client is None  # 懒创建:同步路径不分配
+    backend.close()
