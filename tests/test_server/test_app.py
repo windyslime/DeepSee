@@ -304,3 +304,64 @@ def test_chat_json_root_not_object_400(use_cfg):
 def test_analyze_json_root_not_object_400(use_cfg):
     resp = client.post("/analyze", content=b"[]")
     assert resp.status_code == 400
+
+
+def test_chat_upstream_error_maps_to_502(use_cfg, monkeypatch):
+    from deepsee.errors import ComposeError
+
+    async def boom(question, **kw):
+        raise ComposeError(
+            "DeepSeek API 请求失败: HTTP 502", model="deepseek-chat", status_code=502
+        )
+
+    monkeypatch.setattr("deepsee_server.app.ask_async", boom)
+    resp = client.post(
+        "/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]}
+    )
+    assert resp.status_code == 502
+    body = resp.json()
+    assert body["error"]["type"] == "upstream_error"
+    assert "DeepSeek" in body["error"]["message"]
+
+
+def test_chat_stream_upstream_error_emits_error_chunk(use_cfg, monkeypatch):
+    from deepsee.errors import ComposeError
+
+    async def boom(question, **kw):
+        async def gen():
+            yield "部分内容"
+            raise ComposeError(
+                "DeepSeek API 请求失败: HTTP 502",
+                model="deepseek-chat",
+                status_code=502,
+            )
+
+        return gen()
+
+    monkeypatch.setattr("deepsee_server.app.ask_async", boom)
+    resp = client.post(
+        "/v1/chat/completions",
+        json={"stream": True, "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert resp.status_code == 200
+    lines = [ln for ln in resp.text.splitlines() if ln.startswith("data: ")]
+    assert lines[-1] == "data: [DONE]"
+    # 正常 chunk 仍先到达
+    assert json.loads(lines[0][6:])["choices"][0]["delta"]["content"] == "部分内容"
+    # 上游错误以 error chunk 形式发出,而非截断流
+    error_line = json.loads(lines[-2][6:])
+    assert error_line["error"]["type"] == "upstream_error"
+
+
+def test_analyze_upstream_error_maps_to_502(use_cfg, monkeypatch):
+    from deepsee.errors import ComposeError
+
+    async def boom(image, question, **kw):
+        raise ComposeError(
+            "DeepSeek API 请求失败: HTTP 502", model="deepseek-chat", status_code=502
+        )
+
+    monkeypatch.setattr("deepsee_server.app.ask_with_image_async", boom)
+    resp = client.post("/analyze", json={"image": _png_data_url()})
+    assert resp.status_code == 502
+    assert resp.json()["error"]["type"] == "upstream_error"

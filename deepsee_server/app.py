@@ -22,7 +22,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from deepsee import ask_async, ask_with_image_async, load_config
-from deepsee.errors import ImageError
+from deepsee.errors import ComposeError, ImageError, VisionBackendError
 from deepsee.pipeline.image import MAX_IMAGE_BYTES
 
 app = FastAPI(title="DeepSee Server", version="0.1.0")
@@ -205,20 +205,38 @@ async def chat_completions(request: Request):
             {"error": {"message": str(exc), "type": "invalid_request_error"}},
             status_code=400,
         )
+    except (ComposeError, VisionBackendError) as exc:
+        # 上游(DeepSeek / 视觉后端)失败:映射为 502,保持 OpenAI 兼容 error 体
+        return JSONResponse(
+            {"error": {"message": str(exc), "type": "upstream_error"}},
+            status_code=502,
+        )
 
     if not stream:
         return JSONResponse(_completion_payload(answer, model_id))
 
     async def gen():
-        async for chunk in answer:
-            payload = {
-                "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
-                "object": "chat.completion.chunk",
-                "created": int(time.time()),
-                "model": model_id,
-                "choices": [{"index": 0, "delta": {"content": chunk}, "finish_reason": None}],
-            }
-            yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        try:
+            async for chunk in answer:
+                payload = {
+                    "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
+                    "model": model_id,
+                    "choices": [{"index": 0, "delta": {"content": chunk}, "finish_reason": None}],
+                }
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        except (ComposeError, VisionBackendError) as exc:
+            # 流已开始(状态码 200 无法更改),以 OpenAI 兼容的 error chunk
+            # 明确通知客户端,随后正常收尾,而非截断/空流。
+            yield (
+                "data: "
+                + json.dumps(
+                    {"error": {"message": str(exc), "type": "upstream_error"}},
+                    ensure_ascii=False,
+                )
+                + "\n\n"
+            )
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(gen(), media_type="text/event-stream")
@@ -271,5 +289,10 @@ async def analyze(request: Request):
         return JSONResponse(
             {"error": {"message": str(exc), "type": "invalid_request_error"}},
             status_code=400,
+        )
+    except (ComposeError, VisionBackendError) as exc:
+        return JSONResponse(
+            {"error": {"message": str(exc), "type": "upstream_error"}},
+            status_code=502,
         )
     return JSONResponse({"kind": "auto", "text": answer})
