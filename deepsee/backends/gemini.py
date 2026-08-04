@@ -14,12 +14,11 @@ from deepsee.pipeline.image import ImageInput, prepare_image
 class GeminiBackend(VisionBackend):
     backend_name = "gemini"
 
-    def describe(self, image: ImageInput, prompt: str, **opts) -> str:
-        media_type, b64 = prepare_image(image)
-        url = (
-            f"{self.base_url.rstrip('/')}/v1beta/models/{self.model}:generateContent"
-        )
-        payload = {
+    def _build_url(self) -> str:
+        return f"{self.base_url.rstrip('/')}/v1beta/models/{self.model}:generateContent"
+
+    def _build_payload(self, media_type: str, b64: str, prompt: str) -> dict:
+        return {
             "contents": [
                 {
                     "parts": [
@@ -34,10 +33,20 @@ class GeminiBackend(VisionBackend):
                 }
             ]
         }
-        headers = {"x-goog-api-key": self.api_key}
+
+    def _build_headers(self) -> dict:
+        return {"x-goog-api-key": self.api_key}
+
+    def describe(self, image: ImageInput, prompt: str, **opts) -> str:
+        media_type, b64 = prepare_image(image)
         try:
             resp = retry_request(
-                self._client, "POST", url, retries=self.retries, json=payload, headers=headers
+                self._client,
+                "POST",
+                self._build_url(),
+                retries=self.retries,
+                json=self._build_payload(media_type, b64, prompt),
+                headers=self._build_headers(),
             )
             data = resp.json()
             return data["candidates"][0]["content"]["parts"][0]["text"]
@@ -63,31 +72,14 @@ class GeminiBackend(VisionBackend):
 
     async def describe_async(self, image: ImageInput, prompt: str, **opts) -> str:
         media_type, b64 = await asyncio.to_thread(prepare_image, image)
-        url = f"{self.base_url.rstrip('/')}/v1beta/models/{self.model}:generateContent"
-        payload = {
-            "contents": [
-                {
-                    "parts": [
-                        {
-                            "inline_data": {
-                                "mime_type": media_type,
-                                "data": b64,
-                            }
-                        },
-                        {"text": prompt},
-                    ]
-                }
-            ]
-        }
-        headers = {"x-goog-api-key": self.api_key}
         try:
             resp = await retry_request_async(
                 self.async_client,
                 "POST",
-                url,
+                self._build_url(),
                 retries=self.retries,
-                json=payload,
-                headers=headers,
+                json=self._build_payload(media_type, b64, prompt),
+                headers=self._build_headers(),
             )
             data = resp.json()
             return data["candidates"][0]["content"]["parts"][0]["text"]
