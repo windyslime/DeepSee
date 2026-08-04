@@ -113,9 +113,9 @@ OpenAI 端点行为一致);Anthropic 顶层 `system` 字段与 Gemini `system_in
   随后按标准 `content_block_start/delta/stop` 输出回答文本。
 
 **Gemini**:
-- 非流式:`candidates[0].content.parts` 追加一个
-  `{"text": "<完整分析>", "vision": true}` part(回答文本 part 在其后/前,
-  用 `vision: true` 标记区分);
+- 非流式:`candidates[0].content.parts` 在**首位**放置
+  `{"text": "<完整分析>", "vision": true}` part,回答文本 part 跟在后面
+  (用 `vision: true` 标记区分);
 - 流式:第一个 chunk 的 parts 携带 `{"text": "<完整分析>", "vision": true}`,
   后续 chunk 只带回答文本 part。
 
