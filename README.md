@@ -104,7 +104,11 @@ asyncio.run(main())
   超限在下载/解码前拒绝;下载请求 `Accept-Encoding: identity` 并拒绝压缩响应,
   字节上限按原始字节流式累计(扩容前检查),防止大响应与解压炸弹耗尽内存;
 - **请求体上限**:服务端请求体超过 32 MiB 返回 413,请求体流式读取,
-  无 `Content-Length` 的 chunked 请求同样受限。
+  无 `Content-Length` 的 chunked 请求同样受限;
+- **环境代理**:库发起的上游请求不读环境代理(`trust_env=False`)。SOCKS 代理
+  (如 `ALL_PROXY=socks5://`)在未安装 `socksio` 时会直接 ImportError,且代理
+  会把含 API key 的请求转发到第三方。依赖代理访问公网 API 的环境需直连或
+  自行配置传输层。
 
 ## 已知限制与后续工作
 
