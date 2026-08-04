@@ -27,14 +27,17 @@ class VisionBackend(ABC):
         self.model = model
         self.base_url = base_url
         self.retries = retries
-        self._client = httpx.Client(timeout=60.0)
+        # trust_env=False:不读环境代理。SOCKS 代理(如 ALL_PROXY=socks5://)在
+        # 无 socksio 包时会直接 ImportError;且代理会把含 API key 的请求转发到
+        # 第三方,与 image.py 下载路径(防代理绕过 SSRF 校验)保持一致。
+        self._client = httpx.Client(timeout=60.0, trust_env=False)
         self._async_client: httpx.AsyncClient | None = None
 
     @property
     def async_client(self) -> httpx.AsyncClient:
         """Lazily-created async client (sync paths never allocate one)."""
         if self._async_client is None:
-            self._async_client = httpx.AsyncClient(timeout=60.0)
+            self._async_client = httpx.AsyncClient(timeout=60.0, trust_env=False)
         return self._async_client
 
     @abstractmethod

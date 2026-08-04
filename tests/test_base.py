@@ -204,3 +204,55 @@ def test_async_retry_request_5xx_exhausted_raises():
                     return exc.response.status_code
 
     assert asyncio.run(run()) == 500
+
+
+def test_sync_client_ignores_socks_proxy_env(monkeypatch, sample_image_bytes):
+    """无 socksio 时,ALL_PROXY=socks5 环境不得让库崩溃(trust_env=False)。"""
+    import importlib.util
+
+    if importlib.util.find_spec("socksio") is not None:
+        pytest.skip("socksio installed; ImportError cannot be reproduced")
+
+    from deepsee.backends.openai_compat import OpenAICompatibleBackend
+
+    monkeypatch.setenv("ALL_PROXY", "socks5://127.0.0.1:1080")
+    monkeypatch.setenv("HTTP_PROXY", "socks5://127.0.0.1:1080")
+    backend = OpenAICompatibleBackend(
+        api_key="k", model="m", base_url="https://vision.example.com/v1", retries=0
+    )
+    with respx.mock:
+        respx.post("https://vision.example.com/v1/chat/completions").mock(
+            return_value=httpx.Response(
+                200, json={"choices": [{"message": {"content": "ok"}}]}
+            )
+        )
+        assert backend.describe(sample_image_bytes, "p") == "ok"
+    backend.close()
+
+
+def test_async_client_ignores_socks_proxy_env(monkeypatch, sample_image_bytes):
+    """异步路径同样不受 socks 代理环境变量影响。"""
+    import importlib.util
+
+    if importlib.util.find_spec("socksio") is not None:
+        pytest.skip("socksio installed; ImportError cannot be reproduced")
+
+    from deepsee.backends.openai_compat import OpenAICompatibleBackend
+
+    monkeypatch.setenv("ALL_PROXY", "socks5://127.0.0.1:1080")
+    monkeypatch.setenv("HTTP_PROXY", "socks5://127.0.0.1:1080")
+    backend = OpenAICompatibleBackend(
+        api_key="k", model="m", base_url="https://vision.example.com/v1", retries=0
+    )
+
+    async def run():
+        async with respx.mock:
+            respx.post("https://vision.example.com/v1/chat/completions").mock(
+                return_value=httpx.Response(
+                    200, json={"choices": [{"message": {"content": "ok"}}]}
+                )
+            )
+            return await backend.describe_async(sample_image_bytes, "p")
+
+    assert asyncio.run(run()) == "ok"
+    backend.close()

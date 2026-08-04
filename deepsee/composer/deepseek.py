@@ -82,7 +82,7 @@ def _compose_messages(question: str, context: str) -> list[dict]:
 
 def _request_deepseek(cfg: Config, payload: dict) -> httpx.Response:
     url = f"{cfg.deepseek.base_url.rstrip('/')}/chat/completions"
-    client = httpx.Client(timeout=120.0)
+    client = httpx.Client(timeout=120.0, trust_env=False)
     try:
         return retry_request(
             client,
@@ -109,7 +109,7 @@ def _request_deepseek(cfg: Config, payload: dict) -> httpx.Response:
 
 async def _request_deepseek_async(cfg: Config, payload: dict) -> httpx.Response:
     url = f"{cfg.deepseek.base_url.rstrip('/')}/chat/completions"
-    client = httpx.AsyncClient(timeout=120.0)
+    client = httpx.AsyncClient(timeout=120.0, trust_env=False)
     try:
         return await retry_request_async(
             client,
@@ -397,7 +397,7 @@ def _format_ui_map(data: dict[str, Any]) -> str:
 def _stream_answers(cfg: Config, payload: dict) -> Iterator[str]:
     """SSE-stream the DeepSeek answer chunk by chunk."""
     url = f"{cfg.deepseek.base_url.rstrip('/')}/chat/completions"
-    client = httpx.Client(timeout=120.0)
+    client = httpx.Client(timeout=120.0, trust_env=False)
     try:
         resp = stream_request(
             client,
@@ -441,7 +441,7 @@ def _stream_answers(cfg: Config, payload: dict) -> Iterator[str]:
 async def _stream_answers_async(cfg: Config, payload: dict) -> AsyncIterator[str]:
     """Async SSE-stream the DeepSeek answer chunk by chunk."""
     url = f"{cfg.deepseek.base_url.rstrip('/')}/chat/completions"
-    client = httpx.AsyncClient(timeout=120.0)
+    client = httpx.AsyncClient(timeout=120.0, trust_env=False)
     try:
         resp = await stream_request_async(
             client,
