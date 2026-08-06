@@ -105,6 +105,13 @@ asyncio.run(main())
   字节上限按原始字节流式累计(扩容前检查),防止大响应与解压炸弹耗尽内存;
 - **请求体上限**:服务端请求体超过 32 MiB 返回 413,请求体流式读取,
   无 `Content-Length` 的 chunked 请求同样受限;
+- **流式超时**:DeepSeek 流式响应的 HTTP 帧间超时 120 秒(完全静默的上游
+  120 秒后报错),另有总时长上限 300 秒(`deepsee/composer/deepseek.py`
+  的 `_STREAM_TOTAL_TIMEOUT`)—— 持续发送 SSE keepalive 却永不 `[DONE]`
+  的上游会触发总时长上限,超时抛 `ComposeError`(服务端以 error chunk 通知);
+- **流式资源释放**:库的流式接口(`stream=True`)返回的迭代器需完整消费或
+  调用 `close()` / `aclose()`(建议 `contextlib.closing` / `aclosing`)以释放
+  底层连接;服务端流式端点已用 `aclosing` 保证取消/断开时释放;
 - **环境代理**:库发起的上游请求不读环境代理(`trust_env=False`)。SOCKS 代理
   (如 `ALL_PROXY=socks5://`)在未安装 `socksio` 时会直接 ImportError,且代理
   会把含 API key 的请求转发到第三方。依赖代理访问公网 API 的环境需直连或
