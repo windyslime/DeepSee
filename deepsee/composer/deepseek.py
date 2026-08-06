@@ -13,6 +13,7 @@ import asyncio
 import json
 import time
 from collections.abc import AsyncIterator, Iterator
+from dataclasses import dataclass
 from typing import Any, Union
 
 import httpx
@@ -33,6 +34,20 @@ from deepsee.pipeline.prompts import (
     build_vision_prompt,
 )
 from deepsee.pipeline.ui import normalize_ui_map, parse_structured
+
+
+@dataclass
+class VisionResult:
+    """Composed answer plus the vision analysis used as context.
+
+    ``vision`` 是注入 DeepSeek 的上下文文本(_format_context 的结果,
+    描述或 UI 元素地图),供调用方展开展示;"text" 是最终回答,流式时为
+    ``AsyncIterator[str]``。
+    """
+
+    vision: str
+    text: Union[str, AsyncIterator[str]]
+
 
 # 流式响应的总时长上限(秒)。httpx 的 timeout=120.0 是"帧间"超时:上游
 # 持续发送 SSE keepalive(空行/注释)且永不 [DONE] 时会被无限重置,流会一直
@@ -227,13 +242,17 @@ async def ask_with_image_async(
     stream: bool = False,
     config: Config | None = None,
     mode: str = "auto",
-) -> Union[str, AsyncIterator[str]]:
+    include_vision: bool = False,
+) -> Union[str, AsyncIterator[str], VisionResult]:
     """Async full composition: vision analysis → DeepSeek reasoning.
 
     Same ``mode`` semantics and prompt-injection mitigations as the
     synchronous ``ask_with_image``. With ``stream=True`` the returned async
     iterator must be exhausted or closed via ``aclose()`` (e.g. with
     ``contextlib.aclosing``) to release the underlying HTTP connection.
+
+    ``include_vision=True`` 返回 ``VisionResult``(视觉分析 + 回答);默认
+    ``False`` 保持原有返回类型(``str`` / ``AsyncIterator[str]``)不变。
     """
     cfg = config if config is not None else load_config()
     vision_result = await _analyze_image_async(image, question, mode, cfg)
@@ -244,7 +263,10 @@ async def ask_with_image_async(
         "messages": messages,
         "stream": stream,
     }
-    return await _run_deepseek_async(cfg, payload)
+    answer = await _run_deepseek_async(cfg, payload)
+    if not include_vision:
+        return answer
+    return VisionResult(vision=context, text=answer)
 
 
 def _run_deepseek(

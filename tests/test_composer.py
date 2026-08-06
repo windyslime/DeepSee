@@ -15,6 +15,7 @@ from deepsee.composer.deepseek import (
     ask_with_image_async,
     describe_image,
     describe_image_async,
+    VisionResult,
 )
 from deepsee.config.loader import Config, DeepSeekConfig, VisionConfig
 from deepsee.errors import ComposeError, VisionBackendError
@@ -601,3 +602,36 @@ def test_stream_answers_async_cancel_closes_client(config, monkeypatch):
     n = asyncio.run(_run())
     assert n > 0
     assert closed  # client 已被 aclose
+
+
+def test_ask_with_image_async_include_vision_non_stream(
+    config, sample_image_bytes, monkeypatch
+):
+    # 视觉后端统一用 fake,避免真实网络调用
+    _install_fake(
+        monkeypatch,
+        json.dumps({"is_ui": False, "analysis": FAKE_DESCRIPTION}),
+    )
+
+    async def _run(include_vision):
+        async with respx.mock:
+            respx.post("https://api.deepseek.com/chat/completions").mock(
+                return_value=httpx.Response(
+                    200,
+                    json={"choices": [{"message": {"content": "白猫"}}]},
+                )
+            )
+            return await ask_with_image_async(
+                sample_image_bytes, "是什么?", config=config,
+                include_vision=include_vision,
+            )
+
+    result = asyncio.run(_run(include_vision=True))
+    assert isinstance(result, VisionResult)
+    assert result.text == "白猫"
+    assert FAKE_DESCRIPTION in result.vision
+
+    # 默认(include_vision=False)返回 str,行为不变
+    plain = asyncio.run(_run(include_vision=False))
+    assert isinstance(plain, str)
+    assert plain == "白猫"
