@@ -635,3 +635,37 @@ def test_ask_with_image_async_include_vision_non_stream(
     plain = asyncio.run(_run(include_vision=False))
     assert isinstance(plain, str)
     assert plain == "白猫"
+
+
+def test_ask_with_image_async_include_vision_stream(
+    config, sample_image_bytes, monkeypatch
+):
+    fake = _install_fake(
+        monkeypatch,
+        json.dumps({"is_ui": False, "analysis": FAKE_DESCRIPTION}),
+    )
+    sse_body = (
+        'data: {"choices": [{"delta": {"content": "是"}}]}\n\n'
+        'data: {"choices": [{"delta": {"content": "白猫"}}]}\n\n'
+        "data: [DONE]\n\n"
+    )
+
+    async def _run():
+        async with respx.mock:
+            respx.post("https://api.deepseek.com/chat/completions").mock(
+                return_value=httpx.Response(200, content=sse_body.encode())
+            )
+            result = await ask_with_image_async(
+                sample_image_bytes,
+                "是什么?",
+                config=config,
+                stream=True,
+                include_vision=True,
+            )
+            assert isinstance(result, VisionResult)
+            chunks = [c async for c in result.text]
+            return result, chunks
+
+    result, chunks = asyncio.run(_run())
+    assert chunks == ["是", "白猫"]
+    assert FAKE_DESCRIPTION in result.vision  # vision 完整,不流式
