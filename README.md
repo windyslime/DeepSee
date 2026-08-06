@@ -87,6 +87,24 @@ asyncio.run(main())
 另有 `ask_async`(纯文本)与 `describe_image_async`(仅视觉分析)。
 错误语义与同步接口一致;图片处理(含 SSRF 防护)复用同一套同步管线。
 
+## 多协议端点
+
+服务同时暴露三种协议形状的聊天端点,视觉分析结果作为响应元数据返回,
+供 GUI 像展开思考过程一样点击查看(字段语义 = "模型看到了什么"):
+
+- `POST /v1/chat/completions` — OpenAI 兼容;有图时非流式响应
+  `choices[0].message.vision_analysis`,流式响应的首个 chunk 携带
+  `choices[0].delta.vision_analysis`;
+- `POST /v1/messages` — Anthropic messages 形状;非流式响应顶层
+  `vision_analysis`,流式响应在 `message_start` 后发
+  `{"type": "vision_analysis", "vision": ...}` 事件;
+- `POST /v1beta/models/{model}:generateContent` — Gemini 形状;视觉分析
+  作为 `parts` 首位的 `{"text": ..., "vision": true}` part。
+
+三种端点都支持 `stream` 参数(流式/非流式),图片输入按各自协议形状
+(data URL / base64 source / inline_data / http URL),统一受 SSRF 防护与
+字节上限约束;`file://` 与本地路径一律拒绝。
+
 ## 安全限制
 
 图片加载对服务化入口(`/v1/chat/completions` 的 `image_url`、`/analyze`)统一生效:
