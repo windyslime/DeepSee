@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import AsyncIterator, Iterator
 from typing import Any, Union
 
@@ -32,6 +33,11 @@ from deepsee.pipeline.prompts import (
     build_vision_prompt,
 )
 from deepsee.pipeline.ui import normalize_ui_map, parse_structured
+
+# 流式响应的总时长上限(秒)。httpx 的 timeout=120.0 是"帧间"超时:上游
+# 持续发送 SSE keepalive(空行/注释)且永不 [DONE] 时会被无限重置,流会一直
+# 挂住。此常量给整个流一个总墙钟上限,超时抛 ComposeError。
+_STREAM_TOTAL_TIMEOUT = 300.0
 
 _SYSTEM_TEMPLATE = "你是 DeepSee 多模态助手,基于用户提供的图片和问题回答。"
 _VISION_DATA_WARNING = (
@@ -152,7 +158,9 @@ def ask_with_image(
     - ``"general"``: force general description (skip classification).
 
     ``stream=False`` returns the full answer as ``str``;
-    ``stream=True`` returns an iterator of text chunks.
+    ``stream=True`` returns an iterator of text chunks. The caller must
+    exhaust the iterator or call ``close()`` on it (e.g. via
+    ``contextlib.closing``) to release the underlying HTTP connection.
     """
     cfg = config if config is not None else load_config()
     vision_result = _analyze_image(image, question, mode, cfg)
@@ -175,7 +183,9 @@ def ask(
     """Plain-text DeepSeek conversation (OpenAI-compatible).
 
     ``stream=False`` returns the full answer as ``str``;
-    ``stream=True`` returns an iterator of text chunks.
+    ``stream=True`` returns an iterator of text chunks. The caller must
+    exhaust the iterator or call ``close()`` on it (e.g. via
+    ``contextlib.closing``) to release the underlying HTTP connection.
     """
     cfg = config if config is not None else load_config()
     messages = [{"role": "user", "content": question}]
@@ -196,7 +206,9 @@ async def ask_async(
     """Async plain-text DeepSeek conversation.
 
     ``stream=False`` returns the full answer as ``str``;
-    ``stream=True`` returns an async iterator of text chunks.
+    ``stream=True`` returns an async iterator of text chunks. The caller must
+    exhaust the iterator or call ``aclose()`` on it (e.g. via
+    ``contextlib.aclosing``) to release the underlying HTTP connection.
     """
     cfg = config if config is not None else load_config()
     messages = [{"role": "user", "content": question}]
@@ -219,7 +231,9 @@ async def ask_with_image_async(
     """Async full composition: vision analysis → DeepSeek reasoning.
 
     Same ``mode`` semantics and prompt-injection mitigations as the
-    synchronous ``ask_with_image``.
+    synchronous ``ask_with_image``. With ``stream=True`` the returned async
+    iterator must be exhausted or closed via ``aclose()`` (e.g. with
+    ``contextlib.aclosing``) to release the underlying HTTP connection.
     """
     cfg = config if config is not None else load_config()
     vision_result = await _analyze_image_async(image, question, mode, cfg)
@@ -407,7 +421,13 @@ def _stream_answers(cfg: Config, payload: dict) -> Iterator[str]:
             json=payload,
             headers={"Authorization": f"Bearer {cfg.deepseek.api_key}"},
         )
+        deadline = time.monotonic() + _STREAM_TOTAL_TIMEOUT
         for line in resp.iter_lines():
+            if time.monotonic() >= deadline:
+                raise ComposeError(
+                    "DeepSeek 流式响应超过总时长限制",
+                    model=cfg.deepseek.model,
+                )
             if not line or not line.startswith("data:"):
                 continue
             data = line[5:].strip()
@@ -438,6 +458,29 @@ def _stream_answers(cfg: Config, payload: dict) -> Iterator[str]:
         client.close()
 
 
+async def _bounded_async_iter(agen: AsyncIterator[str], timeout: float) -> AsyncIterator[str]:
+    """Iterate ``agen`` under a total wall-clock deadline (Python 3.10-safe).
+
+    ``asyncio.timeout()`` needs 3.11+; instead every ``__anext__`` is awaited
+    via ``asyncio.wait_for`` with a shrinking remaining budget, which yields
+    the same "overall stream duration" semantics on 3.10: a peer that keeps
+    sending SSE keepalive lines without ever emitting ``[DONE]`` still trips
+    the deadline, and a silent peer trips the leftover budget instead of the
+    (per-read) httpx timeout.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise asyncio.TimeoutError("stream total duration exceeded")
+        try:
+            item = await asyncio.wait_for(agen.__anext__(), remaining)
+        except StopAsyncIteration:
+            return
+        yield item
+
+
 async def _stream_answers_async(cfg: Config, payload: dict) -> AsyncIterator[str]:
     """Async SSE-stream the DeepSeek answer chunk by chunk."""
     url = f"{cfg.deepseek.base_url.rstrip('/')}/chat/completions"
@@ -451,22 +494,30 @@ async def _stream_answers_async(cfg: Config, payload: dict) -> AsyncIterator[str
             json=payload,
             headers={"Authorization": f"Bearer {cfg.deepseek.api_key}"},
         )
-        async for line in resp.aiter_lines():
-            if not line or not line.startswith("data:"):
-                continue
-            data = line[5:].strip()
-            if data == "[DONE]":
-                break
-            try:
-                chunk = json.loads(data)
-            except ValueError as exc:
-                raise ComposeError(
-                    "DeepSeek 流式响应解析失败",
-                    model=cfg.deepseek.model,
-                ) from exc
-            content = chunk.get("choices", [{}])[0].get("delta", {}).get("content")
-            if content:
-                yield content
+        try:
+            async for line in _bounded_async_iter(
+                resp.aiter_lines(), _STREAM_TOTAL_TIMEOUT
+            ):
+                if not line or not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data)
+                except ValueError as exc:
+                    raise ComposeError(
+                        "DeepSeek 流式响应解析失败",
+                        model=cfg.deepseek.model,
+                    ) from exc
+                content = chunk.get("choices", [{}])[0].get("delta", {}).get("content")
+                if content:
+                    yield content
+        except asyncio.TimeoutError as exc:
+            raise ComposeError(
+                "DeepSeek 流式响应超过总时长限制",
+                model=cfg.deepseek.model,
+            ) from exc
     except httpx.HTTPStatusError as exc:
         raise ComposeError(
             f"DeepSeek API 请求失败: HTTP {exc.response.status_code}",

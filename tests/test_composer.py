@@ -7,6 +7,8 @@ import respx
 
 from deepsee.backends.base import VisionBackend
 from deepsee.composer.deepseek import (
+    _stream_answers,
+    _stream_answers_async,
     ask,
     ask_async,
     ask_with_image,
@@ -501,3 +503,101 @@ def test_ask_with_image_async_network_error(config, sample_image_bytes, monkeypa
     with pytest.raises(ComposeError) as exc_info:
         asyncio.run(_run())
     assert "网络错误" in str(exc_info.value)
+
+
+# --- 流式资源管理(审查 L1/L2/L3 的回归测试) ---
+
+
+def _sse_chunk(text: str) -> str:
+    return f'data: {{"choices": [{{"delta": {{"content": "{text}"}}}}]}}\n\n'
+
+
+def _sse_payload(model: str) -> dict:
+    return {"model": model, "messages": [{"role": "user", "content": "hi"}]}
+
+
+def test_stream_answers_total_timeout(config, monkeypatch):
+    """同步流式:数据持续到达但永不 [DONE] 的上游受总时长上限约束。"""
+    monkeypatch.setattr("deepsee.composer.deepseek._STREAM_TOTAL_TIMEOUT", 0.001)
+    body = "".join(_sse_chunk(f"c{i}") for i in range(20000)).encode()
+    with respx.mock:
+        respx.post("https://api.deepseek.com/chat/completions").mock(
+            return_value=httpx.Response(200, content=body)
+        )
+        it = _stream_answers(config, _sse_payload(config.deepseek.model))
+        with pytest.raises(ComposeError, match="总时长"):
+            list(it)
+
+
+def test_stream_answers_async_total_timeout(config, monkeypatch):
+    """异步流式:永不 [DONE] 的上游在总时长耗尽后抛 ComposeError。"""
+    monkeypatch.setattr("deepsee.composer.deepseek._STREAM_TOTAL_TIMEOUT", 0.001)
+    body = "".join(_sse_chunk(f"c{i}") for i in range(20000)).encode()
+
+    async def _run():
+        async with respx.mock:
+            respx.post("https://api.deepseek.com/chat/completions").mock(
+                return_value=httpx.Response(200, content=body)
+            )
+            ag = _stream_answers_async(config, _sse_payload(config.deepseek.model))
+            got = []
+            try:
+                async for chunk in ag:
+                    got.append(chunk)
+            except ComposeError as exc:
+                return got, exc
+            return got, None
+
+    got, exc = asyncio.run(_run())
+    assert exc is not None
+    assert "总时长" in str(exc)
+    assert len(got) < 20000  # 超时前只消费了部分,而不是一次性读完
+
+
+class _InfiniteSSE(httpx.AsyncByteStream):
+    """永不结束的 SSE 上游:持续产出 chunk,没有 [DONE]。"""
+
+    def __init__(self):
+        self.i = 0
+
+    async def __aiter__(self):
+        while True:
+            self.i += 1
+            yield _sse_chunk(f"c{self.i}").encode()
+            await asyncio.sleep(0.005)
+
+
+def test_stream_answers_async_cancel_closes_client(config, monkeypatch):
+    """取消(客户端断开的等价场景)时 AsyncClient 被 aclose,不依赖 GC。"""
+    closed = []
+    orig_aclose = httpx.AsyncClient.aclose
+
+    async def tracking_aclose(self):
+        closed.append(self)
+        await orig_aclose(self)
+
+    monkeypatch.setattr(httpx.AsyncClient, "aclose", tracking_aclose)
+
+    async def _run():
+        async with respx.mock:
+            respx.post("https://api.deepseek.com/chat/completions").mock(
+                return_value=httpx.Response(200, stream=_InfiniteSSE())
+            )
+            ag = _stream_answers_async(config, _sse_payload(config.deepseek.model))
+            seen = []
+
+            async def drain():
+                async for chunk in ag:
+                    seen.append(chunk)
+
+            task = asyncio.create_task(drain())
+            await asyncio.sleep(0.05)  # 让若干 chunk 到达
+            assert seen  # 流确实在产出
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            return len(seen)
+
+    n = asyncio.run(_run())
+    assert n > 0
+    assert closed  # client 已被 aclose
