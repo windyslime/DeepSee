@@ -197,17 +197,22 @@ def test_analyze_body_too_large_413(use_cfg, monkeypatch):
 
 
 def test_analyze_endpoint(use_cfg, monkeypatch):
-    async def fake_ask_with_image(image, question, **kw):
+    """analyze 是纯视觉分析(设计 §5: describe_image_async),不调 DeepSeek。"""
+    seen = {}
+
+    async def fake_describe(image, prompt, **kw):
+        seen["image"] = image
+        seen["prompt"] = prompt
         return "分析结果"
 
-    monkeypatch.setattr(
-        "deepsee_server.app.ask_with_image_async", fake_ask_with_image
-    )
+    monkeypatch.setattr("deepsee_server.app.describe_image_async", fake_describe)
     resp = client.post(
         "/analyze", json={"image": _png_data_url(), "question": "这是什么?"}
     )
     assert resp.status_code == 200
-    assert resp.json() == {"kind": "auto", "text": "分析结果"}
+    assert resp.json() == {"kind": "description", "text": "分析结果"}
+    assert isinstance(seen["image"], bytes)  # data URL 已解码为 bytes
+    assert seen["prompt"] == "这是什么?"
 
 
 def test_chat_chunked_body_too_large_413(use_cfg, monkeypatch):
@@ -279,7 +284,7 @@ def test_analyze_image_error_maps_to_400(use_cfg, monkeypatch):
     async def boom(*args, **kwargs):
         raise ImageError("图片解码失败")
 
-    monkeypatch.setattr("deepsee_server.app.ask_with_image_async", boom)
+    monkeypatch.setattr("deepsee_server.app.describe_image_async", boom)
     resp = client.post("/analyze", json={"image": _png_data_url()})
     assert resp.status_code == 400
 
@@ -361,7 +366,45 @@ def test_analyze_upstream_error_maps_to_502(use_cfg, monkeypatch):
             "DeepSeek API 请求失败: HTTP 502", model="deepseek-chat", status_code=502
         )
 
-    monkeypatch.setattr("deepsee_server.app.ask_with_image_async", boom)
+    monkeypatch.setattr("deepsee_server.app.describe_image_async", boom)
     resp = client.post("/analyze", json={"image": _png_data_url()})
     assert resp.status_code == 502
     assert resp.json()["error"]["type"] == "upstream_error"
+
+
+def test_chat_stream_acloses_iterator(use_cfg, monkeypatch):
+    """流式回答消费完毕后,server 用 aclosing 保证底层 iterator 被 aclose,
+    不依赖 GC(生成器自然耗尽不等于调用方调用了 aclose)。"""
+
+    closed = []
+
+    async def fake_ask(question, **kw):
+        async def inner():
+            yield "你"
+            yield "好"
+
+        class Tracked:
+            def __init__(self):
+                self._inner = inner()
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                return await self._inner.__anext__()
+
+            async def aclose(self):
+                closed.append(True)
+                await self._inner.aclose()
+
+        return Tracked()
+
+    monkeypatch.setattr("deepsee_server.app.ask_async", fake_ask)
+    resp = client.post(
+        "/v1/chat/completions",
+        json={"stream": True, "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert resp.status_code == 200
+    lines = [ln for ln in resp.text.splitlines() if ln.startswith("data: ")]
+    assert lines[-1] == "data: [DONE]"
+    assert closed == [True]

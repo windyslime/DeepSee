@@ -12,6 +12,7 @@ Any local app can point its OpenAI-compatible client at
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import re
 import time
@@ -21,7 +22,7 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from deepsee import ask_async, ask_with_image_async, load_config
+from deepsee import ask_async, ask_with_image_async, describe_image_async, load_config
 from deepsee.errors import ComposeError, ImageError, VisionBackendError
 from deepsee.pipeline.image import MAX_IMAGE_BYTES
 
@@ -216,16 +217,19 @@ async def chat_completions(request: Request):
         return JSONResponse(_completion_payload(answer, model_id))
 
     async def gen():
+        # aclosing:客户端断开(取消)、异常、提前退出时都保证 aclose 底层
+        # AsyncClient,不依赖 GC;生成器已耗尽时 aclose 是幂等无副作用的。
         try:
-            async for chunk in answer:
-                payload = {
-                    "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
-                    "object": "chat.completion.chunk",
-                    "created": int(time.time()),
-                    "model": model_id,
-                    "choices": [{"index": 0, "delta": {"content": chunk}, "finish_reason": None}],
-                }
-                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            async with contextlib.aclosing(answer):
+                async for chunk in answer:
+                    payload = {
+                        "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
+                        "object": "chat.completion.chunk",
+                        "created": int(time.time()),
+                        "model": model_id,
+                        "choices": [{"index": 0, "delta": {"content": chunk}, "finish_reason": None}],
+                    }
+                    yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
         except (ComposeError, VisionBackendError) as exc:
             # 流已开始(状态码 200 无法更改),以 OpenAI 兼容的 error chunk
             # 明确通知客户端,随后正常收尾,而非截断/空流。
@@ -244,7 +248,11 @@ async def chat_completions(request: Request):
 
 @app.post("/analyze")
 async def analyze(request: Request):
-    """Internal vision-only analysis (for the future GUI / Codewhale flow)."""
+    """Internal vision-only analysis (for the future GUI / Codewhale flow).
+
+    纯视觉分析,只调视觉后端、不经过 DeepSeek 推理(设计文档 §5:
+    ``describe_image_async``);返回原始视觉文本。
+    """
     if _body_too_large(request):
         return JSONResponse(
             {"error": {"message": "请求体过大", "type": "invalid_request_error"}},
@@ -284,7 +292,9 @@ async def analyze(request: Request):
         )
     cfg = _current_config()
     try:
-        answer = await ask_with_image_async(img, question or "请描述这张图片", config=cfg)
+        answer = await describe_image_async(
+            img, question or "请描述这张图片", config=cfg
+        )
     except ImageError as exc:
         return JSONResponse(
             {"error": {"message": str(exc), "type": "invalid_request_error"}},
@@ -295,4 +305,4 @@ async def analyze(request: Request):
             {"error": {"message": str(exc), "type": "upstream_error"}},
             status_code=502,
         )
-    return JSONResponse({"kind": "auto", "text": answer})
+    return JSONResponse({"kind": "description", "text": answer})
