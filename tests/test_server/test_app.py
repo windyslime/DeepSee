@@ -43,6 +43,12 @@ def _png_data_url() -> str:
     return f"data:image/png;base64,{b64}"
 
 
+def _png_bytes() -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGB", (4, 4), color=(1, 2, 3)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
 def test_models_endpoint(use_cfg):
     resp = client.get("/v1/models")
     assert resp.status_code == 200
@@ -67,12 +73,14 @@ def test_chat_text(use_cfg, monkeypatch):
 
 
 def test_chat_with_image(use_cfg, monkeypatch):
+    from deepsee.composer.deepseek import VisionResult
+
     seen = {}
 
     async def fake_ask_with_image(image, question, **kw):
         seen["image"] = image
         seen["question"] = question
-        return "图里是一只猫"
+        return VisionResult(vision="图里有一只猫", text="图里是一只猫")
 
     monkeypatch.setattr(
         "deepsee_server.app.ask_with_image_async", fake_ask_with_image
@@ -92,8 +100,10 @@ def test_chat_with_image(use_cfg, monkeypatch):
         },
     )
     assert resp.status_code == 200
-    assert resp.json()["choices"][0]["message"]["content"] == "图里是一只猫"
-    assert isinstance(seen["image"], bytes)  # data URL 已解码为 bytes
+    body = resp.json()["choices"][0]["message"]
+    assert body["content"] == "图里是一只猫"
+    assert body["vision_analysis"] == "图里有一只猫"
+    assert isinstance(seen["image"], bytes)
     assert seen["question"] == "图里有什么?"
 
 
@@ -160,7 +170,7 @@ def test_chat_rejects_file_url_400(use_cfg):
 
 
 def test_chat_data_url_over_limit_400(use_cfg, monkeypatch):
-    monkeypatch.setattr("deepsee_server.app.MAX_IMAGE_BYTES", 64)
+    monkeypatch.setattr("deepsee_server.protocols.base.MAX_IMAGE_BYTES", 64)
     big_b64 = base64.b64encode(b"x" * 512).decode("ascii")
     resp = client.post(
         "/v1/chat/completions",
@@ -408,3 +418,158 @@ def test_chat_stream_acloses_iterator(use_cfg, monkeypatch):
     lines = [ln for ln in resp.text.splitlines() if ln.startswith("data: ")]
     assert lines[-1] == "data: [DONE]"
     assert closed == [True]
+
+
+def test_chat_stream_with_vision_first_chunk(use_cfg, monkeypatch):
+    from deepsee.composer.deepseek import VisionResult
+
+    async def fake_ask_with_image(image, question, **kw):
+        async def gen():
+            yield "你"
+            yield "好"
+
+        return VisionResult(vision="视觉分析内容", text=gen())
+
+    monkeypatch.setattr(
+        "deepsee_server.app.ask_with_image_async", fake_ask_with_image
+    )
+    resp = client.post(
+        "/v1/chat/completions",
+        json={
+            "stream": True,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": _png_data_url()}},
+                        {"type": "text", "text": "hi"},
+                    ],
+                }
+            ],
+        },
+    )
+    assert resp.status_code == 200
+    lines = [ln for ln in resp.text.splitlines() if ln.startswith("data: ")]
+    first = json.loads(lines[0][6:])
+    assert first["choices"][0]["delta"]["vision_analysis"] == "视觉分析内容"
+    assert first["choices"][0]["delta"]["content"] == "你"
+    assert lines[-1] == "data: [DONE]"
+
+
+def test_messages_endpoint_anthropic(use_cfg, monkeypatch):
+    from deepsee.composer.deepseek import VisionResult
+
+    async def fake_ask_with_image(image, question, **kw):
+        return VisionResult(vision="视觉分析", text="白猫")
+
+    monkeypatch.setattr(
+        "deepsee_server.app.ask_with_image_async", fake_ask_with_image
+    )
+    resp = client.post(
+        "/v1/messages",
+        json={
+            "model": "claude-3-5-sonnet",
+            "max_tokens": 100,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": base64.b64encode(_png_bytes()).decode(),
+                            },
+                        },
+                        {"type": "text", "text": "这是什么?"},
+                    ],
+                }
+            ],
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["type"] == "message"
+    assert body["content"] == [{"type": "text", "text": "白猫"}]
+    assert body["vision_analysis"] == "视觉分析"
+
+
+def test_messages_endpoint_no_image_plain_text(use_cfg, monkeypatch):
+    async def fake_ask(question, **kw):
+        return "你好!"
+
+    monkeypatch.setattr("deepsee_server.app.ask_async", fake_ask)
+    resp = client.post(
+        "/v1/messages",
+        json={"model": "m", "messages": [{"role": "user", "content": "你好"}]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["content"] == [{"type": "text", "text": "你好!"}]
+    assert "vision_analysis" not in body
+
+
+def test_gemini_endpoint(use_cfg, monkeypatch):
+    from deepsee.composer.deepseek import VisionResult
+
+    async def fake_ask_with_image(image, question, **kw):
+        return VisionResult(vision="视觉分析", text="白猫")
+
+    monkeypatch.setattr(
+        "deepsee_server.app.ask_with_image_async", fake_ask_with_image
+    )
+    resp = client.post(
+        "/v1beta/models/gemini-2.0-flash:generateContent",
+        json={
+            "contents": [
+                {
+                    "parts": [
+                        {
+                            "inline_data": {
+                                "mime_type": "image/png",
+                                "data": base64.b64encode(_png_bytes()).decode(),
+                            }
+                        },
+                        {"text": "这是什么?"},
+                    ]
+                }
+            ]
+        },
+    )
+    assert resp.status_code == 200
+    parts = resp.json()["candidates"][0]["content"]["parts"]
+    assert parts[0] == {"text": "视觉分析", "vision": True}
+    assert parts[1] == {"text": "白猫"}
+
+
+def test_messages_endpoint_upstream_error_502(use_cfg, monkeypatch):
+    from deepsee.errors import ComposeError
+
+    async def boom(image, question, **kw):
+        raise ComposeError("DeepSeek API 请求失败: HTTP 502", model="m", status_code=502)
+
+    monkeypatch.setattr("deepsee_server.app.ask_with_image_async", boom)
+    resp = client.post(
+        "/v1/messages",
+        json={
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": base64.b64encode(_png_bytes()).decode(),
+                            },
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    assert resp.status_code == 502
+    assert resp.json()["type"] == "error"
+    assert resp.json()["error"]["type"] == "upstream_error"

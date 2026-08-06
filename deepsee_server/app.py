@@ -11,20 +11,16 @@ Any local app can point its OpenAI-compatible client at
 
 from __future__ import annotations
 
-import base64
-import contextlib
 import json
-import re
-import time
-import uuid
-from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from deepsee import ask_async, ask_with_image_async, describe_image_async, load_config
 from deepsee.errors import ComposeError, ImageError, VisionBackendError
-from deepsee.pipeline.image import MAX_IMAGE_BYTES
+from deepsee_server.protocols import anthropic, gemini
+from deepsee_server.protocols.base import extract_image_from_url
+from deepsee_server.protocols import openai as openai_protocol
 
 app = FastAPI(title="DeepSee Server", version="0.1.0")
 
@@ -81,67 +77,6 @@ def list_models():
     }
 
 
-def _extract_image_from_url(url: str) -> bytes | str:
-    """Accept base64 data: URLs (→ bytes) or http(s) URLs (→ URL string).
-
-    http(s) URL 的下载防护(SSRF / 字节上限)在 ``load_image`` 层;data URL
-    在此解码并做字节上限检查;其他形式(含 ``file://`` 本地路径)一律拒绝。
-    """
-    if not isinstance(url, str):
-        # JSON 里 url 字段可能是数字/布尔等,直接调用 str 方法会 500
-        raise ValueError(f"不支持的图片 URL 形式: {url!r}")
-    if url.startswith("data:"):
-        m = re.match(r"data:[^;]+;base64,(.*)", url, re.DOTALL)
-        if not m:
-            raise ValueError("仅支持 base64 data URL 图片")
-        raw = base64.b64decode(m.group(1))
-        if len(raw) > MAX_IMAGE_BYTES:
-            raise ValueError(f"图片数据过大(超过 {MAX_IMAGE_BYTES // (1024 * 1024)} MiB)")
-        return raw
-    if url.startswith("http://") or url.startswith("https://"):
-        return url
-    raise ValueError(f"不支持的图片 URL 形式: {url[:60]}")
-
-
-def _parse_messages(messages: list[dict]) -> tuple[str, bytes | str | None]:
-    """Extract the last user text and an optional image from OpenAI messages."""
-    text = ""
-    image = None
-    for msg in messages:
-        if msg.get("role") != "user":
-            continue
-        content = msg.get("content")
-        if isinstance(content, str):
-            text = content
-        elif isinstance(content, list):
-            for block in content:
-                btype = block.get("type")
-                if btype == "text":
-                    text = block.get("text", "")
-                elif btype == "image_url":
-                    url = block["image_url"].get("url", "")
-                    if url and image is None:
-                        image = _extract_image_from_url(url)
-    return text, image
-
-
-def _completion_payload(content: str, model: str) -> dict[str, Any]:
-    return {
-        "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
-        "object": "chat.completion",
-        "created": int(time.time()),
-        "model": model,
-        "choices": [
-            {
-                "index": 0,
-                "message": {"role": "assistant", "content": content},
-                "finish_reason": "stop",
-            }
-        ],
-        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-    }
-
-
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
     if _body_too_large(request):
@@ -175,7 +110,7 @@ async def chat_completions(request: Request):
     model_id = cfg.deepseek.model
 
     try:
-        text, image = _parse_messages(messages)
+        text, image = openai_protocol.parse_request(body)
     except ValueError as exc:
         return JSONResponse(
             {"error": {"message": str(exc), "type": "invalid_request_error"}},
@@ -195,11 +130,14 @@ async def chat_completions(request: Request):
 
     try:
         if image is not None:
-            answer = await ask_with_image_async(
-                image, text or "请描述这张图片", stream=stream, config=cfg
+            result = await ask_with_image_async(
+                image, text or "请描述这张图片", stream=stream, config=cfg,
+                include_vision=True,
             )
+            answer, vision = result.text, result.vision
         else:
             answer = await ask_async(text, stream=stream, config=cfg)
+            vision = None
     except ImageError as exc:
         # 图片加载/解码失败(SSRF 拒绝、字节/像素超限、格式不支持等)映射为 4xx
         return JSONResponse(
@@ -214,36 +152,12 @@ async def chat_completions(request: Request):
         )
 
     if not stream:
-        return JSONResponse(_completion_payload(answer, model_id))
+        return JSONResponse(openai_protocol.encode_text(answer, vision, model_id))
 
-    async def gen():
-        # aclosing:客户端断开(取消)、异常、提前退出时都保证 aclose 底层
-        # AsyncClient,不依赖 GC;生成器已耗尽时 aclose 是幂等无副作用的。
-        try:
-            async with contextlib.aclosing(answer):
-                async for chunk in answer:
-                    payload = {
-                        "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
-                        "object": "chat.completion.chunk",
-                        "created": int(time.time()),
-                        "model": model_id,
-                        "choices": [{"index": 0, "delta": {"content": chunk}, "finish_reason": None}],
-                    }
-                    yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-        except (ComposeError, VisionBackendError) as exc:
-            # 流已开始(状态码 200 无法更改),以 OpenAI 兼容的 error chunk
-            # 明确通知客户端,随后正常收尾,而非截断/空流。
-            yield (
-                "data: "
-                + json.dumps(
-                    {"error": {"message": str(exc), "type": "upstream_error"}},
-                    ensure_ascii=False,
-                )
-                + "\n\n"
-            )
-        yield "data: [DONE]\n\n"
-
-    return StreamingResponse(gen(), media_type="text/event-stream")
+    return StreamingResponse(
+        openai_protocol.encode_stream(answer, vision, model_id),
+        media_type="text/event-stream",
+    )
 
 
 @app.post("/analyze")
@@ -284,7 +198,7 @@ async def analyze(request: Request):
             status_code=400,
         )
     try:
-        img = _extract_image_from_url(image)
+        img = extract_image_from_url(image)
     except ValueError as exc:
         return JSONResponse(
             {"error": {"message": str(exc), "type": "invalid_request_error"}},
@@ -306,3 +220,141 @@ async def analyze(request: Request):
             status_code=502,
         )
     return JSONResponse({"kind": "description", "text": answer})
+
+
+def _openai_style_413():
+    return JSONResponse(
+        {"error": {"message": "请求体过大", "type": "invalid_request_error"}},
+        status_code=413,
+    )
+
+
+def _openai_style_400(message: str):
+    return JSONResponse(
+        {"error": {"message": message, "type": "invalid_request_error"}},
+        status_code=400,
+    )
+
+
+@app.post("/v1/messages")
+async def anthropic_messages(request: Request):
+    """Anthropic messages 形状端点(内部视觉分析可展开,GUI 使用)。"""
+    if _body_too_large(request):
+        return _openai_style_413()
+    body_bytes = await _read_body_limited(request)
+    if body_bytes is None:
+        return _openai_style_413()
+    try:
+        body = json.loads(body_bytes)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return _openai_style_400("请求体不是合法 JSON")
+    if not isinstance(body, dict):
+        return _openai_style_400("请求体必须是 JSON 对象")
+
+    stream = bool(body.get("stream", False))
+    cfg = _current_config()
+    model_id = cfg.deepseek.model
+
+    try:
+        text, image = anthropic.parse_request(body)
+    except ValueError as exc:
+        return JSONResponse(
+            {"type": "error", "error": {"type": "invalid_request_error", "message": str(exc)}},
+            status_code=400,
+        )
+
+    if not text and image is None:
+        return JSONResponse(
+            {"type": "error", "error": {"type": "invalid_request_error", "message": "请求中没有可用的文本或图片内容"}},
+            status_code=400,
+        )
+
+    try:
+        if image is not None:
+            result = await ask_with_image_async(
+                image, text or "请描述这张图片", stream=stream, config=cfg,
+                include_vision=True,
+            )
+            answer, vision = result.text, result.vision
+        else:
+            answer = await ask_async(text, stream=stream, config=cfg)
+            vision = None
+    except ImageError as exc:
+        return JSONResponse(
+            {"type": "error", "error": {"type": "invalid_request_error", "message": str(exc)}},
+            status_code=400,
+        )
+    except (ComposeError, VisionBackendError) as exc:
+        return JSONResponse(
+            {"type": "error", "error": {"type": "upstream_error", "message": str(exc)}},
+            status_code=502,
+        )
+
+    if not stream:
+        return JSONResponse(anthropic.encode_text(answer, vision, model_id))
+    return StreamingResponse(
+        anthropic.encode_stream(answer, vision, model_id),
+        media_type="text/event-stream",
+    )
+
+
+@app.post("/v1beta/models/{model}:generateContent")
+async def gemini_generate_content(request: Request, model: str):
+    """Gemini generateContent 形状端点(内部视觉分析可展开,GUI 使用)。"""
+    if _body_too_large(request):
+        return _openai_style_413()
+    body_bytes = await _read_body_limited(request)
+    if body_bytes is None:
+        return _openai_style_413()
+    try:
+        body = json.loads(body_bytes)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return _openai_style_400("请求体不是合法 JSON")
+    if not isinstance(body, dict):
+        return _openai_style_400("请求体必须是 JSON 对象")
+
+    stream = bool(body.get("stream", False))
+    cfg = _current_config()
+    model_id = cfg.deepseek.model
+
+    try:
+        text, image = gemini.parse_request(body)
+    except ValueError as exc:
+        return JSONResponse(
+            {"error": {"code": 400, "message": str(exc)}},
+            status_code=400,
+        )
+
+    if not text and image is None:
+        return JSONResponse(
+            {"error": {"code": 400, "message": "请求中没有可用的文本或图片内容"}},
+            status_code=400,
+        )
+
+    try:
+        if image is not None:
+            result = await ask_with_image_async(
+                image, text or "请描述这张图片", stream=stream, config=cfg,
+                include_vision=True,
+            )
+            answer, vision = result.text, result.vision
+        else:
+            answer = await ask_async(text, stream=stream, config=cfg)
+            vision = None
+    except ImageError as exc:
+        return JSONResponse(
+            {"error": {"code": 400, "message": str(exc)}},
+            status_code=400,
+        )
+    except (ComposeError, VisionBackendError) as exc:
+        return JSONResponse(
+            {"error": {"code": 502, "message": str(exc)}},
+            status_code=502,
+        )
+
+    if not stream:
+        return JSONResponse(gemini.encode_text(answer, vision, model))
+    return StreamingResponse(
+        gemini.encode_stream(answer, vision, model),
+        media_type="text/event-stream",
+    )
