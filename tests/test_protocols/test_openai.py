@@ -62,6 +62,42 @@ def test_parse_request_no_image():
     assert image is None
 
 
+def test_parse_request_rejects_malformed_structure():
+    with pytest.raises(ValueError, match="必须是对象"):
+        openai_protocol.parse_request({"messages": [None]})
+    with pytest.raises(ValueError, match="必须是对象"):
+        openai_protocol.parse_request(
+            {"messages": [{"role": "user", "content": [None]}]}
+        )
+    with pytest.raises(ValueError, match="必须是对象"):
+        openai_protocol.parse_request(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [{"type": "image_url", "image_url": None}],
+                    }
+                ]
+            }
+        )
+
+
+def test_parse_request_picks_last_image():
+    body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": "https://a.example/1.png"}},
+                    {"type": "image_url", "image_url": {"url": "https://b.example/2.png"}},
+                ],
+            }
+        ]
+    }
+    _, image = openai_protocol.parse_request(body)
+    assert image == "https://b.example/2.png"
+
+
 def test_extract_image_from_url_over_limit(sample_image_bytes, monkeypatch):
     monkeypatch.setattr("deepsee_server.protocols.base.MAX_IMAGE_BYTES", 4)
     with pytest.raises(ValueError, match="图片数据过大"):
@@ -85,7 +121,7 @@ async def _chunks():
     yield "好"
 
 
-def test_encode_stream_first_chunk_carries_vision():
+def test_encode_stream_vision_is_leading_chunk():
     async def _run():
         out = []
         async for chunk in openai_protocol.encode_stream(
@@ -97,8 +133,33 @@ def test_encode_stream_first_chunk_carries_vision():
     out = asyncio.run(_run())
     lines = [ln for ln in b"".join(out).decode().splitlines() if ln.startswith("data: ")]
     first = json.loads(lines[0][6:])
+    # vision 是独立前置 chunk:只带 vision_analysis,不带 content
     assert first["choices"][0]["delta"]["vision_analysis"] == "视觉分析内容"
-    assert first["choices"][0]["delta"]["content"] == "你"
+    assert "content" not in first["choices"][0]["delta"]
     second = json.loads(lines[1][6:])
+    assert second["choices"][0]["delta"]["content"] == "你"
     assert "vision_analysis" not in second["choices"][0]["delta"]
+    assert lines[-1] == "data: [DONE]"
+
+
+def test_encode_stream_empty_chunks_keeps_vision():
+    """上游零文本时,vision 仍作为首个 chunk 发出(不丢失)。"""
+
+    async def empty():
+        return
+        yield  # pragma: no cover
+
+    async def _run():
+        out = []
+        async for chunk in openai_protocol.encode_stream(
+            empty(), "视觉分析内容", "deepseek-chat"
+        ):
+            out.append(chunk)
+        return out
+
+    out = asyncio.run(_run())
+    lines = [ln for ln in b"".join(out).decode().splitlines() if ln.startswith("data: ")]
+    assert len(lines) == 2  # vision chunk + [DONE]
+    first = json.loads(lines[0][6:])
+    assert first["choices"][0]["delta"]["vision_analysis"] == "视觉分析内容"
     assert lines[-1] == "data: [DONE]"

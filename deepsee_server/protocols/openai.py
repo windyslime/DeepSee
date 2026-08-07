@@ -15,10 +15,16 @@ from .base import extract_image_from_url
 
 
 def parse_request(body: dict) -> tuple[str, bytes | str | None]:
-    """Extract the last user text and an optional image (OpenAI shape)."""
+    """Extract the last user text and the last image (OpenAI shape).
+
+    畸形结构(messages/content 项非对象、image_url 非对象)抛 ``ValueError``,
+    由端点映射为 400;多图时取**最后一张**(与设计 §2 一致)。
+    """
     text = ""
     image = None
     for msg in body.get("messages", []):
+        if not isinstance(msg, dict):
+            raise ValueError("messages 项必须是对象")
         if msg.get("role") != "user":
             continue
         content = msg.get("content")
@@ -26,12 +32,17 @@ def parse_request(body: dict) -> tuple[str, bytes | str | None]:
             text = content
         elif isinstance(content, list):
             for block in content:
+                if not isinstance(block, dict):
+                    raise ValueError("content 块必须是对象")
                 btype = block.get("type")
                 if btype == "text":
                     text = block.get("text", "")
                 elif btype == "image_url":
-                    url = block["image_url"].get("url", "")
-                    if url and image is None:
+                    img = block.get("image_url")
+                    if not isinstance(img, dict):
+                        raise ValueError("image_url 必须是对象")
+                    url = img.get("url", "")
+                    if url:
                         image = extract_image_from_url(url)
     return text, image
 
@@ -56,24 +67,41 @@ async def encode_stream(
     vision: str | None,
     model: str,
 ) -> AsyncIterator[bytes]:
-    """SSE stream: vision_analysis on the first chunk, then content, then [DONE].
+    """SSE stream: vision_analysis as a leading chunk, then content, then [DONE].
 
-    ``chunks`` 在结束/异常/取消时都会被 ``aclose``(不依赖 GC)。
+    ``vision`` 作为**独立前置 chunk**(``delta.vision_analysis``)发出,即使
+    上游回答为空流也不会丢失;``chunks`` 在结束/异常/取消时都会被
+    ``aclose``(不依赖 GC)。
     """
     try:
         async with contextlib.aclosing(chunks):
-            async for chunk in chunks:
-                delta: dict[str, Any] = {"content": chunk}
-                if vision is not None:
-                    delta["vision_analysis"] = vision
-                    vision = None  # 只出现在首个 chunk
+            if vision is not None:
                 payload = {
                     "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
                     "object": "chat.completion.chunk",
                     "created": int(time.time()),
                     "model": model,
                     "choices": [
-                        {"index": 0, "delta": delta, "finish_reason": None}
+                        {
+                            "index": 0,
+                            "delta": {"vision_analysis": vision},
+                            "finish_reason": None,
+                        }
+                    ],
+                }
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode()
+            async for chunk in chunks:
+                payload = {
+                    "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
+                    "model": model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"content": chunk},
+                            "finish_reason": None,
+                        }
                     ],
                 }
                 yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode()

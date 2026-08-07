@@ -71,6 +71,32 @@ def test_parse_request_no_image():
     assert image is None
 
 
+def test_parse_request_rejects_malformed_structure():
+    with pytest.raises(ValueError, match="必须是对象"):
+        gemini_protocol.parse_request({"contents": [None]})
+    with pytest.raises(ValueError, match="必须是对象"):
+        gemini_protocol.parse_request({"contents": [{"parts": [None]}]})
+    with pytest.raises(ValueError, match="必须是对象"):
+        gemini_protocol.parse_request(
+            {"contents": [{"parts": [{"inline_data": None}]}]}
+        )
+
+
+def test_parse_request_picks_last_image():
+    body = {
+        "contents": [
+            {
+                "parts": [
+                    {"file_data": {"file_uri": "https://a.example/1.png"}},
+                    {"file_data": {"file_uri": "https://b.example/2.png"}},
+                ]
+            }
+        ]
+    }
+    _, image = gemini_protocol.parse_request(body)
+    assert image == "https://b.example/2.png"
+
+
 def test_encode_text_vision_part_first():
     payload = gemini_protocol.encode_text("白猫", "视觉分析", "gemini-2.0-flash")
     parts = payload["candidates"][0]["content"]["parts"]
@@ -88,7 +114,7 @@ async def _chunks():
     yield "好"
 
 
-def test_encode_stream_first_chunk_carries_vision():
+def test_encode_stream_vision_is_leading_chunk():
     async def _run():
         out = []
         async for chunk in gemini_protocol.encode_stream(
@@ -99,8 +125,33 @@ def test_encode_stream_first_chunk_carries_vision():
 
     out = asyncio.run(_run())
     chunks = [json.loads(c) for c in out]
+    # vision 是独立前置 chunk:只带 vision part,不带回答文本
     first_parts = chunks[0]["candidates"][0]["content"]["parts"]
-    assert first_parts[0] == {"text": "视觉分析", "vision": True}
-    assert first_parts[1] == {"text": "你"}
+    assert first_parts == [{"text": "视觉分析", "vision": True}]
     second_parts = chunks[1]["candidates"][0]["content"]["parts"]
-    assert second_parts == [{"text": "好"}]
+    assert second_parts == [{"text": "你"}]
+    third_parts = chunks[2]["candidates"][0]["content"]["parts"]
+    assert third_parts == [{"text": "好"}]
+
+
+def test_encode_stream_empty_chunks_keeps_vision():
+    """上游零文本时,vision 仍作为首个 chunk 发出(不丢失)。"""
+
+    async def empty():
+        return
+        yield  # pragma: no cover
+
+    async def _run():
+        out = []
+        async for chunk in gemini_protocol.encode_stream(
+            empty(), "视觉分析", "m"
+        ):
+            out.append(chunk)
+        return out
+
+    out = asyncio.run(_run())
+    chunks = [json.loads(c) for c in out]
+    assert len(chunks) == 1
+    assert chunks[0]["candidates"][0]["content"]["parts"] == [
+        {"text": "视觉分析", "vision": True}
+    ]

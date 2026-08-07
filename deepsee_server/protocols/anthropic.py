@@ -13,14 +13,18 @@ from .base import decode_base64_image, extract_image_from_url
 
 
 def parse_request(body: dict) -> tuple[str, bytes | str | None]:
-    """Extract the last user text and an optional image (Anthropic shape).
+    """Extract the last user text and the last image (Anthropic shape).
 
-    图片块 ``{type: "image", source: ...}``:base64 source 解码为 bytes;url
-    source 交给 ``extract_image_from_url``(http(s) 放行,file:// 拒绝)。
+    畸形结构(messages/content 项或 image source 非对象)抛 ``ValueError``,
+    由端点映射为 400;多图时取**最后一张**(与设计 §2 一致)。图片块
+    ``{type: "image", source: ...}``:base64 source 解码为 bytes;url source
+    交给 ``extract_image_from_url``(http(s) 放行,file:// 拒绝)。
     """
     text = ""
     image = None
     for msg in body.get("messages", []):
+        if not isinstance(msg, dict):
+            raise ValueError("messages 项必须是对象")
         if msg.get("role") != "user":
             continue
         content = msg.get("content")
@@ -28,11 +32,15 @@ def parse_request(body: dict) -> tuple[str, bytes | str | None]:
             text = content
         elif isinstance(content, list):
             for block in content:
+                if not isinstance(block, dict):
+                    raise ValueError("content 块必须是对象")
                 btype = block.get("type")
                 if btype == "text":
                     text = block.get("text", "")
-                elif btype == "image" and image is None:
-                    source = block.get("source", {})
+                elif btype == "image":
+                    source = block.get("source")
+                    if not isinstance(source, dict):
+                        raise ValueError("image source 必须是对象")
                     if source.get("type") == "base64":
                         data = source.get("data", "")
                         if data:
@@ -70,50 +78,64 @@ async def encode_stream(
     vision: str | None,
     model: str,
 ) -> AsyncIterator[bytes]:
-    """SSE event stream: message_start → vision_analysis → text deltas → stop."""
-    yield _event(
-        {
-            "type": "message_start",
-            "message": {
-                "id": f"msg_{uuid.uuid4().hex[:12]}",
-                "type": "message",
-                "role": "assistant",
-                "model": model,
-                "content": [],
-                "stop_reason": None,
-                "usage": {"input_tokens": 0, "output_tokens": 0},
-            },
-        }
-    )
-    if vision is not None:
-        yield _event({"type": "vision_analysis", "vision": vision})
-    yield _event(
-        {
-            "type": "content_block_start",
-            "index": 0,
-            "content_block": {"type": "text", "text": ""},
-        }
-    )
+    """SSE event stream: message_start → vision_analysis → text deltas → stop.
+
+    整个事件序列(含前置事件)都在 ``aclosing`` 内:客户端在任何阶段断开
+    (生成器被 ``aclose``)都会关闭上游迭代器。上游错误时只发 ``error``
+    事件,不再发送 ``end_turn``/``message_stop`` 成功收尾。
+    """
     try:
         async with contextlib.aclosing(chunks):
-            async for chunk in chunks:
+            yield _event(
+                {
+                    "type": "message_start",
+                    "message": {
+                        "id": f"msg_{uuid.uuid4().hex[:12]}",
+                        "type": "message",
+                        "role": "assistant",
+                        "model": model,
+                        "content": [],
+                        "stop_reason": None,
+                        "usage": {"input_tokens": 0, "output_tokens": 0},
+                    },
+                }
+            )
+            if vision is not None:
+                yield _event({"type": "vision_analysis", "vision": vision})
+            yield _event(
+                {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {"type": "text", "text": ""},
+                }
+            )
+            errored = False
+            try:
+                async for chunk in chunks:
+                    yield _event(
+                        {
+                            "type": "content_block_delta",
+                            "index": 0,
+                            "delta": {"type": "text_delta", "text": chunk},
+                        }
+                    )
+            except (ComposeError, VisionBackendError) as exc:
                 yield _event(
                     {
-                        "type": "content_block_delta",
-                        "index": 0,
-                        "delta": {"type": "text_delta", "text": chunk},
+                        "type": "error",
+                        "error": {"type": "upstream_error", "message": str(exc)},
                     }
                 )
-    except (ComposeError, VisionBackendError) as exc:
-        yield _event(
-            {"type": "error", "error": {"type": "upstream_error", "message": str(exc)}}
-        )
-    yield _event({"type": "content_block_stop", "index": 0})
-    yield _event(
-        {
-            "type": "message_delta",
-            "delta": {"stop_reason": "end_turn"},
-            "usage": {"output_tokens": 0},
-        }
-    )
-    yield _event({"type": "message_stop"})
+                errored = True
+            if not errored:
+                yield _event({"type": "content_block_stop", "index": 0})
+                yield _event(
+                    {
+                        "type": "message_delta",
+                        "delta": {"stop_reason": "end_turn"},
+                        "usage": {"output_tokens": 0},
+                    }
+                )
+                yield _event({"type": "message_stop"})
+    except GeneratorExit:
+        raise

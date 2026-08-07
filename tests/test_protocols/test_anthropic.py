@@ -123,3 +123,84 @@ def test_encode_stream_emits_vision_event_before_content():
     deltas = [e for e in events if e["type"] == "content_block_delta"]
     assert [d["delta"]["text"] for d in deltas] == ["你", "好"]
     assert events[-1]["type"] == "message_stop"
+
+
+def test_encode_stream_closes_chunks_on_disconnect_during_prefix():
+    """客户端在前置事件阶段断开时,上游迭代器必须被 aclose(不依赖 GC)。"""
+    closed = []
+
+    class Tracking:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            return await self._inner.__anext__()
+
+        async def aclose(self):
+            closed.append(True)
+            await self._inner.aclose()
+
+    async def _run():
+        ag = anthropic_protocol.encode_stream(Tracking(_chunks()), "视觉", "m")
+        it = ag.__aiter__()
+        await it.__anext__()  # message_start
+        await it.__anext__()  # vision_analysis —— 客户端在此断开
+        await ag.aclose()
+        return closed
+
+    asyncio.run(_run())
+    assert closed == [True]
+
+
+def test_encode_stream_no_success_tail_after_error():
+    """上游错误后只发 error 事件,不再发 end_turn/message_stop 成功收尾。"""
+    from deepsee.errors import ComposeError
+
+    async def failing():
+        yield "部分"
+        raise ComposeError("boom", model="m")
+
+    async def _run():
+        out = []
+        async for chunk in anthropic_protocol.encode_stream(failing(), None, "m"):
+            out.append(chunk)
+        return out
+
+    out = asyncio.run(_run())
+    lines = [ln for ln in b"".join(out).decode().splitlines() if ln.startswith("data: ")]
+    events = [json.loads(ln[6:]) for ln in lines]
+    types = [e["type"] for e in events]
+    assert "error" in types
+    assert "message_delta" not in types
+    assert "message_stop" not in types
+    assert "content_block_stop" not in types
+
+
+def test_parse_request_rejects_malformed_content():
+    with pytest.raises(ValueError, match="必须是对象"):
+        anthropic_protocol.parse_request(
+            {"messages": [{"role": "user", "content": [None]}]}
+        )
+    with pytest.raises(ValueError, match="必须是对象"):
+        anthropic_protocol.parse_request(
+            {"messages": [{"role": "user", "content": [{"type": "image"}]}]}
+        )
+
+
+def test_parse_request_picks_last_image():
+    body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "url", "url": "https://a.example/1.png"}},
+                    {"type": "image", "source": {"type": "url", "url": "https://b.example/2.png"}},
+                ],
+            }
+        ]
+    }
+    _, image = anthropic_protocol.parse_request(body)
+    assert image == "https://b.example/2.png"

@@ -12,23 +12,35 @@ from .base import decode_base64_image, extract_image_from_url
 
 
 def parse_request(body: dict) -> tuple[str, bytes | str | None]:
-    """Extract the last text and an optional image (Gemini shape).
+    """Extract the last text and the last image (Gemini shape).
 
+    畸形结构(contents/parts 项或 inline_data/file_data 非对象)抛
+    ``ValueError``,由端点映射为 400;多图时取**最后一张**(与设计 §2 一致)。
     ``inline_data``(base64)解码为 bytes;``file_data.file_uri`` 交给
     ``extract_image_from_url``(http(s) 放行,file:// 拒绝)。
     """
     text = ""
     image = None
     for content in body.get("contents", []):
+        if not isinstance(content, dict):
+            raise ValueError("contents 项必须是对象")
         for part in content.get("parts", []):
+            if not isinstance(part, dict):
+                raise ValueError("parts 项必须是对象")
             if "text" in part:
                 text = part["text"]
-            elif "inline_data" in part and image is None:
-                data = part["inline_data"].get("data", "")
+            elif "inline_data" in part:
+                inline = part["inline_data"]
+                if not isinstance(inline, dict):
+                    raise ValueError("inline_data 必须是对象")
+                data = inline.get("data", "")
                 if data:
                     image = decode_base64_image(data)
-            elif "file_data" in part and image is None:
-                uri = part["file_data"].get("file_uri", "")
+            elif "file_data" in part:
+                fd = part["file_data"]
+                if not isinstance(fd, dict):
+                    raise ValueError("file_data 必须是对象")
+                uri = fd.get("file_uri", "")
                 if uri:
                     image = extract_image_from_url(uri)
     return text, image
@@ -61,18 +73,33 @@ async def encode_stream(
     vision: str | None,
     model: str,
 ) -> AsyncIterator[bytes]:
-    """Chunk stream (newline-delimited JSON): vision part on first chunk."""
+    """Chunk stream (newline-delimited JSON): vision as a leading part chunk.
+
+    ``vision`` 作为**独立前置 chunk**(``parts`` 首位 ``{"text", "vision":
+    True}``)发出,即使上游回答为空流也不会丢失。
+    """
     try:
         async with contextlib.aclosing(chunks):
-            async for chunk in chunks:
-                parts = []
-                if vision is not None:
-                    parts.append({"text": vision, "vision": True})
-                    vision = None
-                parts.append({"text": chunk})
+            if vision is not None:
                 payload = {
                     "candidates": [
-                        {"content": {"role": "model", "parts": parts}, "index": 0}
+                        {
+                            "content": {
+                                "role": "model",
+                                "parts": [{"text": vision, "vision": True}],
+                            },
+                            "index": 0,
+                        }
+                    ]
+                }
+                yield json.dumps(payload, ensure_ascii=False).encode() + b"\n"
+            async for chunk in chunks:
+                payload = {
+                    "candidates": [
+                        {
+                            "content": {"role": "model", "parts": [{"text": chunk}]},
+                            "index": 0,
+                        }
                     ]
                 }
                 yield json.dumps(payload, ensure_ascii=False).encode() + b"\n"
