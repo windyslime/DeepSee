@@ -74,7 +74,7 @@ async def encode_stream(chunks: AsyncIterator[str], vision: str) -> AsyncIterato
 ```
 
 **文本提取规则**(三种协议一致):取请求中**最后一个**文本片段作为 `question`;
-图片取最后一个图片表示(OpenAI 与现有 `_parse_messages` 语义一致)。
+图片取**最后一个**图片表示(多图请求以最后一张为准,三种协议一致)。
 **`model` 字段**:接受任意值,不写死、不强制匹配,按配置执行(与现有
 OpenAI 端点行为一致);Anthropic 顶层 `system` 字段与 Gemini `system_instruction`
 在形状兼容阶段忽略,不参与组合。
@@ -103,8 +103,9 @@ OpenAI 端点行为一致);Anthropic 顶层 `system` 字段与 Gemini `system_in
 
 **OpenAI**:
 - 非流式:`choices[0].message.vision_analysis`(与 `content` 平级);
-- 流式:第一个 chunk 的 `choices[0].delta.vision_analysis` 携带完整分析,
-  后续 chunk 的 `delta` 只带 `content`;末尾 `data: [DONE]` 不变。
+- 流式:**独立前置 chunk** —— 首个 chunk 的 `choices[0].delta` 只带
+  `vision_analysis`(不含 `content`),后续 chunk 的 `delta` 只带 `content`;
+  即使上游回答为空流,vision chunk 也照常发出;末尾 `data: [DONE]` 不变。
 
 **Anthropic**:
 - 非流式:响应顶层 `vision_analysis` 字段(与 `content` 平级);
@@ -116,8 +117,9 @@ OpenAI 端点行为一致);Anthropic 顶层 `system` 字段与 Gemini `system_in
 - 非流式:`candidates[0].content.parts` 在**首位**放置
   `{"text": "<完整分析>", "vision": true}` part,回答文本 part 跟在后面
   (用 `vision: true` 标记区分);
-- 流式:第一个 chunk 的 parts 携带 `{"text": "<完整分析>", "vision": true}`,
-  后续 chunk 只带回答文本 part。
+- 流式:**独立前置 chunk** —— 首个 chunk 的 parts 只有
+  `{"text": "<完整分析>", "vision": true}`,后续 chunk 只带回答文本 part;
+  即使上游回答为空流,vision chunk 也照常发出。
 
 ### 4. 错误处理与安全
 

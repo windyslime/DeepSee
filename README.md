@@ -93,17 +93,55 @@ asyncio.run(main())
 供 GUI 像展开思考过程一样点击查看(字段语义 = "模型看到了什么"):
 
 - `POST /v1/chat/completions` — OpenAI 兼容;有图时非流式响应
-  `choices[0].message.vision_analysis`,流式响应的首个 chunk 携带
-  `choices[0].delta.vision_analysis`;
+  `choices[0].message.vision_analysis`;流式响应以独立前置 chunk 发出
+  `choices[0].delta.vision_analysis`(不含 `content`),随后是回答文本 chunk;
 - `POST /v1/messages` — Anthropic messages 形状;非流式响应顶层
-  `vision_analysis`,流式响应在 `message_start` 后发
+  `vision_analysis`;流式响应在 `message_start` 后发
   `{"type": "vision_analysis", "vision": ...}` 事件;
-- `POST /v1beta/models/{model}:generateContent` — Gemini 形状;视觉分析
-  作为 `parts` 首位的 `{"text": ..., "vision": true}` part。
+- `POST /v1beta/models/{model}:generateContent` — Gemini 形状;非流式
+  响应 `parts` 首位是 `{"text": ..., "vision": true}`;流式响应以独立前置
+  chunk 发出该 part。
 
 三种端点都支持 `stream` 参数(流式/非流式),图片输入按各自协议形状
 (data URL / base64 source / inline_data / http URL),统一受 SSRF 防护与
 字节上限约束;`file://` 与本地路径一律拒绝。
+
+**示例**(以 base64 图片 + 流式为例):
+
+```bash
+# OpenAI 兼容
+curl -N http://127.0.0.1:8712/v1/chat/completions -H "Content-Type: application/json" -d '{
+  "stream": true,
+  "messages": [{"role": "user", "content": [
+    {"type": "text", "text": "这张图里有什么?"},
+    {"type": "image_url", "image_url": {"url": "data:image/png;base64,<BASE64>"}}
+  ]}]
+}'
+# 响应:首个 chunk 为 {"choices":[{"delta":{"vision_analysis":"..."}}]},
+#       之后 chunk 为 {"choices":[{"delta":{"content":"..."}}]},最后 data: [DONE]
+
+# Anthropic messages
+curl -N http://127.0.0.1:8712/v1/messages -H "Content-Type: application/json" -d '{
+  "model": "claude-3-5-sonnet",
+  "max_tokens": 1024,
+  "stream": true,
+  "messages": [{"role": "user", "content": [
+    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "<BASE64>"}},
+    {"type": "text", "text": "这张图里有什么?"}
+  ]}]
+}'
+# 响应:message_start → {"type":"vision_analysis","vision":"..."} → content_block_delta(text) → message_stop
+
+# Gemini generateContent
+curl -N http://127.0.0.1:8712/v1beta/models/gemini-2.0-flash:generateContent -H "Content-Type: application/json" -d '{
+  "stream": true,
+  "contents": [{"parts": [
+    {"inline_data": {"mime_type": "image/png", "data": "<BASE64>"}},
+    {"text": "这张图里有什么?"}
+  ]}]
+}'
+# 响应:首个 chunk 的 parts 为 [{"text":"...","vision":true}],后续 chunk 只带回答文本 part
+```
 
 ## 安全限制
 
