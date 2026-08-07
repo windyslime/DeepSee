@@ -451,8 +451,11 @@ def test_chat_stream_with_vision_first_chunk(use_cfg, monkeypatch):
     assert resp.status_code == 200
     lines = [ln for ln in resp.text.splitlines() if ln.startswith("data: ")]
     first = json.loads(lines[0][6:])
+    # vision 是独立前置 chunk:只带 vision_analysis
     assert first["choices"][0]["delta"]["vision_analysis"] == "视觉分析内容"
-    assert first["choices"][0]["delta"]["content"] == "你"
+    assert "content" not in first["choices"][0]["delta"]
+    second = json.loads(lines[1][6:])
+    assert second["choices"][0]["delta"]["content"] == "你"
     assert lines[-1] == "data: [DONE]"
 
 
@@ -573,3 +576,229 @@ def test_messages_endpoint_upstream_error_502(use_cfg, monkeypatch):
     assert resp.status_code == 502
     assert resp.json()["type"] == "error"
     assert resp.json()["error"]["type"] == "upstream_error"
+
+
+def test_messages_endpoint_stream_anthropic(use_cfg, monkeypatch):
+    from deepsee.composer.deepseek import VisionResult
+
+    async def fake_ask_with_image(image, question, **kw):
+        async def gen():
+            yield "你"
+            yield "好"
+
+        return VisionResult(vision="视觉分析", text=gen())
+
+    monkeypatch.setattr(
+        "deepsee_server.app.ask_with_image_async", fake_ask_with_image
+    )
+    resp = client.post(
+        "/v1/messages",
+        json={
+            "stream": True,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": base64.b64encode(_png_bytes()).decode(),
+                            },
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+    assert resp.status_code == 200
+    lines = [ln for ln in resp.text.splitlines() if ln.startswith("data: ")]
+    events = [json.loads(ln[6:]) for ln in lines]
+    assert events[0]["type"] == "message_start"
+    assert events[1]["type"] == "vision_analysis"
+    assert events[1]["vision"] == "视觉分析"
+    deltas = [e for e in events if e["type"] == "content_block_delta"]
+    assert [d["delta"]["text"] for d in deltas] == ["你", "好"]
+    assert events[-1]["type"] == "message_stop"
+
+
+def test_gemini_endpoint_stream(use_cfg, monkeypatch):
+    from deepsee.composer.deepseek import VisionResult
+
+    async def fake_ask_with_image(image, question, **kw):
+        async def gen():
+            yield "你"
+            yield "好"
+
+        return VisionResult(vision="视觉分析", text=gen())
+
+    monkeypatch.setattr(
+        "deepsee_server.app.ask_with_image_async", fake_ask_with_image
+    )
+    resp = client.post(
+        "/v1beta/models/m:generateContent",
+        json={
+            "stream": True,
+            "contents": [
+                {
+                    "parts": [
+                        {
+                            "inline_data": {
+                                "mime_type": "image/png",
+                                "data": base64.b64encode(_png_bytes()).decode(),
+                            }
+                        }
+                    ]
+                }
+            ],
+        },
+    )
+    assert resp.status_code == 200
+    chunks = [json.loads(c) for c in resp.text.strip().splitlines()]
+    assert chunks[0]["candidates"][0]["content"]["parts"] == [
+        {"text": "视觉分析", "vision": True}
+    ]
+    assert chunks[1]["candidates"][0]["content"]["parts"] == [{"text": "你"}]
+    assert chunks[2]["candidates"][0]["content"]["parts"] == [{"text": "好"}]
+
+
+def test_gemini_endpoint_plain_text(use_cfg, monkeypatch):
+    async def fake_ask(question, **kw):
+        return "你好!"
+
+    monkeypatch.setattr("deepsee_server.app.ask_async", fake_ask)
+    resp = client.post(
+        "/v1beta/models/m:generateContent",
+        json={"contents": [{"parts": [{"text": "你好"}]}]},
+    )
+    assert resp.status_code == 200
+    parts = resp.json()["candidates"][0]["content"]["parts"]
+    assert parts == [{"text": "你好!"}]
+
+
+def test_messages_endpoint_malformed_400(use_cfg):
+    resp = client.post("/v1/messages", json={"messages": [None]})
+    assert resp.status_code == 400
+    assert resp.json()["type"] == "error"
+
+
+def test_messages_endpoint_invalid_json_400_anthropic_shape(use_cfg):
+    resp = client.post("/v1/messages", content=b"not json")
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["type"] == "error"
+    assert body["error"]["type"] == "invalid_request_error"
+
+
+def test_messages_endpoint_body_too_large_413_anthropic_shape(use_cfg, monkeypatch):
+    monkeypatch.setattr("deepsee_server.app._MAX_REQUEST_BODY", 64)
+    resp = client.post("/v1/messages", json={"model": "m", "messages": [{"role": "user", "content": "x" * 4096}]})
+    assert resp.status_code == 413
+    assert resp.json()["type"] == "error"
+
+
+def test_gemini_endpoint_invalid_json_400_gemini_shape(use_cfg):
+    resp = client.post(
+        "/v1beta/models/m:generateContent", content=b"not json"
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["error"]["code"] == 400
+
+
+def test_gemini_endpoint_body_too_large_413_gemini_shape(use_cfg, monkeypatch):
+    monkeypatch.setattr("deepsee_server.app._MAX_REQUEST_BODY", 64)
+    resp = client.post(
+        "/v1beta/models/m:generateContent",
+        json={"contents": [{"parts": [{"text": "x" * 4096}]}]},
+    )
+    assert resp.status_code == 413
+    assert resp.json()["error"]["code"] == 413
+
+
+def test_messages_endpoint_image_error_400(use_cfg, monkeypatch):
+    from deepsee.errors import ImageError
+
+    async def boom(image, question, **kw):
+        raise ImageError("图片解码失败")
+
+    monkeypatch.setattr("deepsee_server.app.ask_with_image_async", boom)
+    resp = client.post(
+        "/v1/messages",
+        json={
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": base64.b64encode(_png_bytes()).decode(),
+                            },
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["type"] == "invalid_request_error"
+
+
+def test_gemini_endpoint_image_error_400(use_cfg, monkeypatch):
+    from deepsee.errors import ImageError
+
+    async def boom(image, question, **kw):
+        raise ImageError("图片解码失败")
+
+    monkeypatch.setattr("deepsee_server.app.ask_with_image_async", boom)
+    resp = client.post(
+        "/v1beta/models/m:generateContent",
+        json={
+            "contents": [
+                {
+                    "parts": [
+                        {
+                            "inline_data": {
+                                "mime_type": "image/png",
+                                "data": base64.b64encode(_png_bytes()).decode(),
+                            }
+                        }
+                    ]
+                }
+            ]
+        },
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == 400
+
+
+def test_gemini_endpoint_upstream_error_502(use_cfg, monkeypatch):
+    from deepsee.errors import ComposeError
+
+    async def boom(image, question, **kw):
+        raise ComposeError("DeepSeek API 请求失败: HTTP 502", model="m", status_code=502)
+
+    monkeypatch.setattr("deepsee_server.app.ask_with_image_async", boom)
+    resp = client.post(
+        "/v1beta/models/m:generateContent",
+        json={
+            "contents": [
+                {
+                    "parts": [
+                        {
+                            "inline_data": {
+                                "mime_type": "image/png",
+                                "data": base64.b64encode(_png_bytes()).decode(),
+                            }
+                        }
+                    ]
+                }
+            ]
+        },
+    )
+    assert resp.status_code == 502
+    assert resp.json()["error"]["code"] == 502

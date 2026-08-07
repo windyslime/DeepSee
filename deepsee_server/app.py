@@ -222,17 +222,22 @@ async def analyze(request: Request):
     return JSONResponse({"kind": "description", "text": answer})
 
 
-def _openai_style_413():
+def _anthropic_error(status: int, message: str):
+    """Anthropic 形状错误体(请求级错误,如 413 / 非法 JSON)。"""
     return JSONResponse(
-        {"error": {"message": "请求体过大", "type": "invalid_request_error"}},
-        status_code=413,
+        {
+            "type": "error",
+            "error": {"type": "invalid_request_error", "message": message},
+        },
+        status_code=status,
     )
 
 
-def _openai_style_400(message: str):
+def _gemini_error(status: int, message: str):
+    """Gemini 形状错误体(请求级错误,如 413 / 非法 JSON)。"""
     return JSONResponse(
-        {"error": {"message": message, "type": "invalid_request_error"}},
-        status_code=400,
+        {"error": {"code": status, "message": message}},
+        status_code=status,
     )
 
 
@@ -240,16 +245,16 @@ def _openai_style_400(message: str):
 async def anthropic_messages(request: Request):
     """Anthropic messages 形状端点(内部视觉分析可展开,GUI 使用)。"""
     if _body_too_large(request):
-        return _openai_style_413()
+        return _anthropic_error(413, "请求体过大")
     body_bytes = await _read_body_limited(request)
     if body_bytes is None:
-        return _openai_style_413()
+        return _anthropic_error(413, "请求体过大")
     try:
         body = json.loads(body_bytes)
     except (json.JSONDecodeError, UnicodeDecodeError):
-        return _openai_style_400("请求体不是合法 JSON")
+        return _anthropic_error(400, "请求体不是合法 JSON")
     if not isinstance(body, dict):
-        return _openai_style_400("请求体必须是 JSON 对象")
+        return _anthropic_error(400, "请求体必须是 JSON 对象")
 
     stream = bool(body.get("stream", False))
     cfg = _current_config()
@@ -302,16 +307,16 @@ async def anthropic_messages(request: Request):
 async def gemini_generate_content(request: Request, model: str):
     """Gemini generateContent 形状端点(内部视觉分析可展开,GUI 使用)。"""
     if _body_too_large(request):
-        return _openai_style_413()
+        return _gemini_error(413, "请求体过大")
     body_bytes = await _read_body_limited(request)
     if body_bytes is None:
-        return _openai_style_413()
+        return _gemini_error(413, "请求体过大")
     try:
         body = json.loads(body_bytes)
     except (json.JSONDecodeError, UnicodeDecodeError):
-        return _openai_style_400("请求体不是合法 JSON")
+        return _gemini_error(400, "请求体不是合法 JSON")
     if not isinstance(body, dict):
-        return _openai_style_400("请求体必须是 JSON 对象")
+        return _gemini_error(400, "请求体必须是 JSON 对象")
 
     stream = bool(body.get("stream", False))
     cfg = _current_config()
