@@ -168,7 +168,8 @@ curl -N http://127.0.0.1:8712/v1beta/models/gemini-2.0-flash:generateContent -H 
   的 `_STREAM_TOTAL_TIMEOUT`)—— 持续发送 SSE keepalive 却永不 `[DONE]`
   的上游会触发总时长上限,超时抛 `ComposeError`(服务端以 error chunk 通知)。
   注意**同步接口是检查点软上限**(每次读到数据后检查截止时间,完全静默时
-  可能再等待一次 120 秒帧间超时);**异步接口是硬上限**(每帧等待剩余时间);
+  可能再等待一次 120 秒帧间超时);**异步接口是响应体迭代阶段的硬上限**
+  (响应头返回后每帧等待剩余时间;连接、响应头等待与重试不计入 300 秒);
 - **流式资源释放**:库的流式接口(`stream=True`)返回的迭代器需完整消费或
   调用 `close()` / `aclose()`(建议 `contextlib.closing` / `aclosing`)以释放
   底层连接;服务端流式端点已用 `aclosing` 保证取消/断开时释放;
