@@ -56,6 +56,9 @@ def parse_request(body: dict) -> tuple[str, bytes | str | None]:
                         url = source.get("url", "")
                         if url:
                             image = extract_image_from_url(url)
+        elif "content" in msg:
+            # content 字段存在但既非字符串也非数组(含 null/数字/对象)
+            raise ValueError("content 必须是字符串或数组")
     return text, image
 
 

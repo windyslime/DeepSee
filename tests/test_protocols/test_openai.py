@@ -117,6 +117,18 @@ def test_parse_request_rejects_non_string_text():
         )
 
 
+def test_parse_request_rejects_invalid_content_type():
+    """content 字段存在但既非字符串也非数组时必须 400,不得静默忽略。"""
+    with pytest.raises(ValueError, match="content 必须是字符串或数组"):
+        openai_protocol.parse_request(
+            {"messages": [{"role": "user", "content": 123}]}
+        )
+    with pytest.raises(ValueError, match="content 必须是字符串或数组"):
+        openai_protocol.parse_request(
+            {"messages": [{"role": "user", "content": {"a": 1}}]}
+        )
+
+
 def test_extract_image_from_url_over_limit(sample_image_bytes, monkeypatch):
     monkeypatch.setattr("deepsee_server.protocols.base.MAX_IMAGE_BYTES", 4)
     with pytest.raises(ValueError, match="图片数据过大"):
