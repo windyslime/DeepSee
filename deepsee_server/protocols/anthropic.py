@@ -15,14 +15,18 @@ from .base import decode_base64_image, extract_image_from_url
 def parse_request(body: dict) -> tuple[str, bytes | str | None]:
     """Extract the last user text and the last image (Anthropic shape).
 
-    畸形结构(messages/content 项或 image source 非对象)抛 ``ValueError``,
-    由端点映射为 400;多图时取**最后一张**(与设计 §2 一致)。图片块
-    ``{type: "image", source: ...}``:base64 source 解码为 bytes;url source
-    交给 ``extract_image_from_url``(http(s) 放行,file:// 拒绝)。
+    畸形结构(messages 非数组、messages/content 项或 image source 非对象、
+    text 非字符串)抛 ``ValueError``,由端点映射为 400;多图时取**最后一张**
+    (与设计 §2 一致)。图片块 ``{type: "image", source: ...}``:base64 source
+    解码为 bytes;url source 交给 ``extract_image_from_url``(http(s) 放行,
+    file:// 拒绝)。
     """
+    messages = body.get("messages")
+    if "messages" in body and not isinstance(messages, list):
+        raise ValueError("messages 必须是数组")
     text = ""
     image = None
-    for msg in body.get("messages", []):
+    for msg in messages or []:
         if not isinstance(msg, dict):
             raise ValueError("messages 项必须是对象")
         if msg.get("role") != "user":
@@ -36,7 +40,10 @@ def parse_request(body: dict) -> tuple[str, bytes | str | None]:
                     raise ValueError("content 块必须是对象")
                 btype = block.get("type")
                 if btype == "text":
-                    text = block.get("text", "")
+                    value = block.get("text", "")
+                    if not isinstance(value, str):
+                        raise ValueError("text 必须是字符串")
+                    text = value
                 elif btype == "image":
                     source = block.get("source")
                     if not isinstance(source, dict):

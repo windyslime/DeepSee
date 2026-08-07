@@ -97,6 +97,23 @@ def test_parse_request_picks_last_image():
     assert image == "https://b.example/2.png"
 
 
+def test_parse_request_rejects_null_container():
+    """容器字段为 null 时必须抛 ValueError(端点映射 400),而非 TypeError/500。"""
+    with pytest.raises(ValueError, match="必须是数组"):
+        gemini_protocol.parse_request({"contents": None})
+    with pytest.raises(ValueError, match="必须是数组"):
+        gemini_protocol.parse_request({"contents": [{"parts": None}]})
+    with pytest.raises(ValueError, match="必须是数组"):
+        gemini_protocol.parse_request({"contents": [{"parts": "not-a-list"}]})
+
+
+def test_parse_request_rejects_non_string_text():
+    with pytest.raises(ValueError, match="text 必须是字符串"):
+        gemini_protocol.parse_request(
+            {"contents": [{"parts": [{"text": {"a": 1}}]}]}
+        )
+
+
 def test_encode_text_vision_part_first():
     payload = gemini_protocol.encode_text("白猫", "视觉分析", "gemini-2.0-flash")
     parts = payload["candidates"][0]["content"]["parts"]

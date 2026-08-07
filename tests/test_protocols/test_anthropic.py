@@ -204,3 +204,22 @@ def test_parse_request_picks_last_image():
     }
     _, image = anthropic_protocol.parse_request(body)
     assert image == "https://b.example/2.png"
+
+
+def test_parse_request_rejects_null_container():
+    """容器字段为 null 时必须抛 ValueError(端点映射 400),而非 TypeError/500。"""
+    with pytest.raises(ValueError, match="必须是数组"):
+        anthropic_protocol.parse_request({"messages": None})
+    with pytest.raises(ValueError, match="必须是数组"):
+        anthropic_protocol.parse_request({"messages": "not-a-list"})
+
+
+def test_parse_request_rejects_non_string_text():
+    with pytest.raises(ValueError, match="text 必须是字符串"):
+        anthropic_protocol.parse_request(
+            {
+                "messages": [
+                    {"role": "user", "content": [{"type": "text", "text": 123}]}
+                ]
+            }
+        )

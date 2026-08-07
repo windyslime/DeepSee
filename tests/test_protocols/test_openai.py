@@ -98,6 +98,25 @@ def test_parse_request_picks_last_image():
     assert image == "https://b.example/2.png"
 
 
+def test_parse_request_rejects_null_container():
+    """容器字段为 null 时必须抛 ValueError(端点映射 400),而非 TypeError/500。"""
+    with pytest.raises(ValueError, match="必须是数组"):
+        openai_protocol.parse_request({"messages": None})
+    with pytest.raises(ValueError, match="必须是数组"):
+        openai_protocol.parse_request({"messages": "not-a-list"})
+
+
+def test_parse_request_rejects_non_string_text():
+    with pytest.raises(ValueError, match="text 必须是字符串"):
+        openai_protocol.parse_request(
+            {
+                "messages": [
+                    {"role": "user", "content": [{"type": "text", "text": {"a": 1}}]}
+                ]
+            }
+        )
+
+
 def test_extract_image_from_url_over_limit(sample_image_bytes, monkeypatch):
     monkeypatch.setattr("deepsee_server.protocols.base.MAX_IMAGE_BYTES", 4)
     with pytest.raises(ValueError, match="图片数据过大"):
