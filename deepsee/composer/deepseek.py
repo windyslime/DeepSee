@@ -431,9 +431,17 @@ def _format_ui_map(data: dict[str, Any]) -> str:
 
 
 def _stream_answers(cfg: Config, payload: dict) -> Iterator[str]:
-    """SSE-stream the DeepSeek answer chunk by chunk."""
+    """SSE-stream the DeepSeek answer chunk by chunk.
+
+    总时长语义:每次读到数据后检查截止时间(检查点),**完全静默**的上游
+    由 httpx 帧间超时(120s)兜底 —— 因此同步版总时长不是硬上限,最坏
+    延迟一次帧间超时;若在截止时间之后才因静默失败,错误会映射为
+    "超过总时长限制"而非"网络错误"。异步版(``_stream_answers_async``)
+    是硬上限(每帧等待剩余时间)。
+    """
     url = f"{cfg.deepseek.base_url.rstrip('/')}/chat/completions"
     client = httpx.Client(timeout=120.0, trust_env=False)
+    deadline = time.monotonic() + _STREAM_TOTAL_TIMEOUT
     try:
         resp = stream_request(
             client,
@@ -443,7 +451,6 @@ def _stream_answers(cfg: Config, payload: dict) -> Iterator[str]:
             json=payload,
             headers={"Authorization": f"Bearer {cfg.deepseek.api_key}"},
         )
-        deadline = time.monotonic() + _STREAM_TOTAL_TIMEOUT
         for line in resp.iter_lines():
             if time.monotonic() >= deadline:
                 raise ComposeError(
@@ -472,6 +479,12 @@ def _stream_answers(cfg: Config, payload: dict) -> Iterator[str]:
             status_code=exc.response.status_code,
         ) from exc
     except httpx.HTTPError as exc:
+        if time.monotonic() >= deadline:
+            # 静默上游在截止时间之后才失败:归因于总时长,而非网络错误
+            raise ComposeError(
+                "DeepSeek 流式响应超过总时长限制",
+                model=cfg.deepseek.model,
+            ) from exc
         raise ComposeError(
             f"DeepSeek API 网络错误: {exc.__class__.__name__}",
             model=cfg.deepseek.model,
