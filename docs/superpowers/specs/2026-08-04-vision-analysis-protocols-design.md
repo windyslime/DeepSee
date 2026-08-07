@@ -128,6 +128,10 @@ OpenAI 端点行为一致);Anthropic 顶层 `system` 字段与 Gemini `system_in
   - OpenAI:`{"error": {"message", "type"}}`;
   - Anthropic:`{"type": "error", "error": {"type", "message"}}`;
   - Gemini:`{"error": {"code", "message"}}`;
+- **畸形请求统一 400**:三个解析器对容器字段(`messages`/`contents`/`parts`)
+  非数组、容器/嵌套项非对象、`text` 非字符串、`image_url`/`source`/
+  `inline_data`/`file_data` 非对象等所有形状错误一律抛 `ValueError`,
+  由端点映射为各协议形状的 400 —— 不得以 `TypeError`/框架级 500 泄漏;
 - 请求体 32 MiB 上限与 chunked 流式读取(`_read_body_limited`)对所有新端点生效;
 - URL 图片下载统一走 SSRF 防护与字节上限(不因协议不同而绕过)。
 

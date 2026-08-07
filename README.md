@@ -145,7 +145,9 @@ curl -N http://127.0.0.1:8712/v1beta/models/gemini-2.0-flash:generateContent -H 
 
 ## 安全限制
 
-图片加载对服务化入口(`/v1/chat/completions` 的 `image_url`、`/analyze`)统一生效:
+图片加载对所有服务化图片入口统一生效(`/v1/chat/completions` 的
+`image_url`、`/v1/messages` 的 `source.url`/base64、`/v1beta/models/{model}:generateContent`
+的 `file_data.file_uri`/`inline_data`、`/analyze`):
 
 - **SSRF 防护**:http(s) URL 的主机(含每一跳重定向目标)解析到私网、loopback、
   link-local、保留或特殊用途地址(如 `127.0.0.1`、`169.254.169.254`)时拒绝下载。
@@ -164,7 +166,9 @@ curl -N http://127.0.0.1:8712/v1beta/models/gemini-2.0-flash:generateContent -H 
 - **流式超时**:DeepSeek 流式响应的 HTTP 帧间超时 120 秒(完全静默的上游
   120 秒后报错),另有总时长上限 300 秒(`deepsee/composer/deepseek.py`
   的 `_STREAM_TOTAL_TIMEOUT`)—— 持续发送 SSE keepalive 却永不 `[DONE]`
-  的上游会触发总时长上限,超时抛 `ComposeError`(服务端以 error chunk 通知);
+  的上游会触发总时长上限,超时抛 `ComposeError`(服务端以 error chunk 通知)。
+  注意**同步接口是检查点软上限**(每次读到数据后检查截止时间,完全静默时
+  可能再等待一次 120 秒帧间超时);**异步接口是硬上限**(每帧等待剩余时间);
 - **流式资源释放**:库的流式接口(`stream=True`)返回的迭代器需完整消费或
   调用 `close()` / `aclose()`(建议 `contextlib.closing` / `aclosing`)以释放
   底层连接;服务端流式端点已用 `aclosing` 保证取消/断开时释放;
