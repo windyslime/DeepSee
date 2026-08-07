@@ -874,3 +874,162 @@ def test_chat_null_container_400(use_cfg):
     resp = client.post("/v1/chat/completions", json={"messages": None})
     assert resp.status_code == 400
     assert resp.json()["error"]["type"] == "invalid_request_error"
+
+
+def test_chat_content_invalid_type_400(use_cfg):
+    """content 非字符串/数组必须 400,不得静默忽略并回答旧文本。"""
+    resp = client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [
+                {"role": "user", "content": "先前的文本"},
+                {"role": "user", "content": 123},
+            ]
+        },
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["type"] == "invalid_request_error"
+
+
+def test_messages_endpoint_content_invalid_type_400(use_cfg):
+    resp = client.post(
+        "/v1/messages",
+        json={
+            "messages": [
+                {"role": "user", "content": "先前的文本"},
+                {"role": "user", "content": 123},
+            ]
+        },
+    )
+    assert resp.status_code == 400
+    assert resp.json()["type"] == "error"
+
+
+def test_chat_ssrf_private_url_400(use_cfg):
+    """私网 URL 图片在真实防护路径被拒绝(不发起连接)→ 400。"""
+    resp = client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": "http://127.0.0.1/x.png"}}
+                    ],
+                }
+            ]
+        },
+    )
+    assert resp.status_code == 400
+    assert "拒绝" in resp.json()["error"]["message"]
+
+
+def test_messages_endpoint_ssrf_private_url_400(use_cfg):
+    resp = client.post(
+        "/v1/messages",
+        json={
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {"type": "url", "url": "http://169.254.169.254/latest/meta-data/"},
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    assert resp.status_code == 400
+    assert resp.json()["type"] == "error"
+
+
+def test_gemini_endpoint_ssrf_private_uri_400(use_cfg):
+    resp = client.post(
+        "/v1beta/models/m:generateContent",
+        json={
+            "contents": [
+                {"parts": [{"file_data": {"file_uri": "http://127.0.0.1/x.png"}}]}
+            ]
+        },
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == 400
+
+
+def test_messages_endpoint_base64_over_limit_400(use_cfg, monkeypatch):
+    """Anthropic base64 图片超限必须 400(协议形状)。"""
+    monkeypatch.setattr("deepsee_server.protocols.base.MAX_IMAGE_BYTES", 64)
+    resp = client.post(
+        "/v1/messages",
+        json={
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": base64.b64encode(b"x" * 512).decode(),
+                            },
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    assert resp.status_code == 400
+    assert resp.json()["type"] == "error"
+
+
+def test_gemini_endpoint_inline_data_over_limit_400(use_cfg, monkeypatch):
+    """Gemini inline_data 图片超限必须 400(协议形状)。"""
+    monkeypatch.setattr("deepsee_server.protocols.base.MAX_IMAGE_BYTES", 64)
+    resp = client.post(
+        "/v1beta/models/m:generateContent",
+        json={
+            "contents": [
+                {
+                    "parts": [
+                        {
+                            "inline_data": {
+                                "mime_type": "image/png",
+                                "data": base64.b64encode(b"x" * 512).decode(),
+                            }
+                        }
+                    ]
+                }
+            ]
+        },
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == 400
+
+
+def test_chat_malformed_400_even_without_config(monkeypatch):
+    """畸形请求的校验必须先于配置加载:配置缺失时仍返回 400,而非 500。"""
+    from deepsee.errors import ConfigError
+
+    def no_config():
+        raise ConfigError("缺少 deepseek.api_key")
+
+    monkeypatch.setattr("deepsee_server.app._current_config", no_config)
+    resp = client.post("/v1/chat/completions", json={"messages": None})
+    assert resp.status_code == 400
+    assert resp.json()["error"]["type"] == "invalid_request_error"
+
+
+def test_messages_malformed_400_even_without_config(monkeypatch):
+    """Anthropic 畸形请求在配置缺失时仍返回协议形状 400,而非 500。"""
+    from deepsee.errors import ConfigError
+
+    def no_config():
+        raise ConfigError("缺少 deepseek.api_key")
+
+    monkeypatch.setattr("deepsee_server.app._current_config", no_config)
+    resp = client.post("/v1/messages", json={"messages": None})
+    assert resp.status_code == 400
+    assert resp.json()["type"] == "error"

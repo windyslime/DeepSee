@@ -104,11 +104,8 @@ async def chat_completions(request: Request):
             status_code=400,
         )
     stream = bool(body.get("stream", False))
-    messages = body.get("messages", [])
-    # 请求里的 model 字段接受任意值:不写死、不强制匹配,按配置执行
-    cfg = _current_config()
-    model_id = cfg.deepseek.model
 
+    # 先解析并校验请求(畸形请求不依赖配置,统一返回 400),再加载配置
     try:
         text, image = openai_protocol.parse_request(body)
     except ValueError as exc:
@@ -127,6 +124,10 @@ async def chat_completions(request: Request):
             },
             status_code=400,
         )
+
+    # 请求里的 model 字段接受任意值:不写死、不强制匹配,按配置执行
+    cfg = _current_config()
+    model_id = cfg.deepseek.model
 
     try:
         if image is not None:
@@ -257,9 +258,8 @@ async def anthropic_messages(request: Request):
         return _anthropic_error(400, "请求体必须是 JSON 对象")
 
     stream = bool(body.get("stream", False))
-    cfg = _current_config()
-    model_id = cfg.deepseek.model
 
+    # 先解析并校验请求(畸形请求不依赖配置,统一返回 400),再加载配置
     try:
         text, image = anthropic.parse_request(body)
     except ValueError as exc:
@@ -273,6 +273,9 @@ async def anthropic_messages(request: Request):
             {"type": "error", "error": {"type": "invalid_request_error", "message": "请求中没有可用的文本或图片内容"}},
             status_code=400,
         )
+
+    cfg = _current_config()
+    model_id = cfg.deepseek.model
 
     try:
         if image is not None:
@@ -319,9 +322,8 @@ async def gemini_generate_content(request: Request, model: str):
         return _gemini_error(400, "请求体必须是 JSON 对象")
 
     stream = bool(body.get("stream", False))
-    cfg = _current_config()
-    model_id = cfg.deepseek.model
 
+    # 先解析并校验请求(畸形请求不依赖配置,统一返回 400),再加载配置
     try:
         text, image = gemini.parse_request(body)
     except ValueError as exc:
@@ -335,6 +337,9 @@ async def gemini_generate_content(request: Request, model: str):
             {"error": {"code": 400, "message": "请求中没有可用的文本或图片内容"}},
             status_code=400,
         )
+
+    cfg = _current_config()
+    model_id = cfg.deepseek.model
 
     try:
         if image is not None:
