@@ -802,3 +802,75 @@ def test_gemini_endpoint_upstream_error_502(use_cfg, monkeypatch):
     )
     assert resp.status_code == 502
     assert resp.json()["error"]["code"] == 502
+
+
+def test_messages_endpoint_stream_plain_text(use_cfg, monkeypatch):
+    """验收矩阵:Anthropic 流式 + 无图。"""
+    async def fake_ask(question, **kw):
+        async def gen():
+            yield "你"
+            yield "好"
+
+        return gen()
+
+    monkeypatch.setattr("deepsee_server.app.ask_async", fake_ask)
+    resp = client.post(
+        "/v1/messages",
+        json={"model": "m", "stream": True, "messages": [{"role": "user", "content": "你好"}]},
+    )
+    assert resp.status_code == 200
+    lines = [ln for ln in resp.text.splitlines() if ln.startswith("data: ")]
+    events = [json.loads(ln[6:]) for ln in lines]
+    assert events[0]["type"] == "message_start"
+    # 无图:不应有 vision_analysis 事件
+    assert all(e["type"] != "vision_analysis" for e in events)
+    deltas = [e for e in events if e["type"] == "content_block_delta"]
+    assert [d["delta"]["text"] for d in deltas] == ["你", "好"]
+    assert events[-1]["type"] == "message_stop"
+
+
+def test_gemini_endpoint_stream_plain_text(use_cfg, monkeypatch):
+    """验收矩阵:Gemini 流式 + 无图。"""
+    async def fake_ask(question, **kw):
+        async def gen():
+            yield "你"
+            yield "好"
+
+        return gen()
+
+    monkeypatch.setattr("deepsee_server.app.ask_async", fake_ask)
+    resp = client.post(
+        "/v1beta/models/m:generateContent",
+        json={"stream": True, "contents": [{"parts": [{"text": "你好"}]}]},
+    )
+    assert resp.status_code == 200
+    chunks = [json.loads(c) for c in resp.text.strip().splitlines()]
+    # 无图:所有 chunk 都不含 vision part
+    for chunk in chunks:
+        parts = chunk["candidates"][0]["content"]["parts"]
+        assert all("vision" not in p for p in parts)
+    assert chunks[0]["candidates"][0]["content"]["parts"] == [{"text": "你"}]
+    assert chunks[1]["candidates"][0]["content"]["parts"] == [{"text": "好"}]
+
+
+def test_messages_endpoint_null_container_400(use_cfg):
+    """畸形容器(messages: null)必须返回协议形状 400,而非 500。"""
+    resp = client.post("/v1/messages", json={"messages": None})
+    assert resp.status_code == 400
+    assert resp.json()["type"] == "error"
+
+
+def test_gemini_endpoint_null_container_400(use_cfg):
+    """畸形容器(contents: null)必须返回协议形状 400,而非 500。"""
+    resp = client.post(
+        "/v1beta/models/m:generateContent", json={"contents": None}
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == 400
+
+
+def test_chat_null_container_400(use_cfg):
+    """畸形容器(messages: null)必须返回 OpenAI 形状 400,而非 500。"""
+    resp = client.post("/v1/chat/completions", json={"messages": None})
+    assert resp.status_code == 400
+    assert resp.json()["error"]["type"] == "invalid_request_error"
