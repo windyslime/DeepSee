@@ -555,14 +555,18 @@ def test_stream_answers_async_total_timeout(config, monkeypatch):
     assert len(got) < 20000  # 超时前只消费了部分,而不是一次性读完
 
 
-class _InfiniteSSE(httpx.AsyncByteStream):
-    """永不结束的 SSE 上游:持续产出 chunk,没有 [DONE]。"""
+class _LongSSE(httpx.AsyncByteStream):
+    """足够长的 SSE 上游:测试在 ~0.05s 取消时远未结束,没有 [DONE]。
+
+    不用无限流:respx 的无限 ``AsyncByteStream`` 在取消/关闭后事件循环
+    清理会挂起(实测),有限流则干净地退出。
+    """
 
     def __init__(self):
         self.i = 0
 
     async def __aiter__(self):
-        while True:
+        for _ in range(2000):  # 每 5ms 一个 chunk,总时长约 10s
             self.i += 1
             yield _sse_chunk(f"c{self.i}").encode()
             await asyncio.sleep(0.005)
@@ -582,7 +586,7 @@ def test_stream_answers_async_cancel_closes_client(config, monkeypatch):
     async def _run():
         async with respx.mock:
             respx.post("https://api.deepseek.com/chat/completions").mock(
-                return_value=httpx.Response(200, stream=_InfiniteSSE())
+                return_value=httpx.Response(200, stream=_LongSSE())
             )
             ag = _stream_answers_async(config, _sse_payload(config.deepseek.model))
             seen = []
@@ -596,7 +600,9 @@ def test_stream_answers_async_cancel_closes_client(config, monkeypatch):
             assert seen  # 流确实在产出
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
-                await task
+                # 防御性超时:若未来 respx 行为变化导致取消不传播,
+                # 失败而非挂死整个测试进程
+                await asyncio.wait_for(task, 10)
             return len(seen)
 
     n = asyncio.run(_run())
