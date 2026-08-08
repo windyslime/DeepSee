@@ -43,16 +43,22 @@ def parse_request(body: dict) -> tuple[str, bytes | str | None]:
                 inline = part["inline_data"]
                 if not isinstance(inline, dict):
                     raise ValueError("inline_data 必须是对象")
-                data = inline.get("data", "")
-                if data:
-                    image = decode_base64_image(data)
+                if "data" in inline:
+                    data = inline["data"]
+                    if not isinstance(data, str):
+                        raise ValueError("data 必须是字符串")
+                    if data:
+                        image = decode_base64_image(data)
             elif "file_data" in part:
                 fd = part["file_data"]
                 if not isinstance(fd, dict):
                     raise ValueError("file_data 必须是对象")
-                uri = fd.get("file_uri", "")
-                if uri:
-                    image = extract_image_from_url(uri)
+                if "file_uri" in fd:
+                    uri = fd["file_uri"]
+                    if not isinstance(uri, str):
+                        raise ValueError("file_uri 必须是字符串")
+                    if uri:
+                        image = extract_image_from_url(uri)
     return text, image
 
 

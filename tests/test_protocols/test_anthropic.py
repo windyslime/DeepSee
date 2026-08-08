@@ -235,3 +235,37 @@ def test_parse_request_rejects_invalid_content_type():
         anthropic_protocol.parse_request(
             {"messages": [{"role": "user", "content": {"a": 1}}]}
         )
+
+
+def test_parse_request_rejects_falsy_image_leaf():
+    """data 字段存在但非字符串(如 0)时不得被当作"无图"忽略。"""
+    with pytest.raises(ValueError, match="data 必须是字符串"):
+        anthropic_protocol.parse_request(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "看图"},
+                            {
+                                "type": "image",
+                                "source": {"type": "base64", "media_type": "image/png", "data": 0},
+                            },
+                        ],
+                    }
+                ]
+            }
+        )
+
+
+def test_parse_request_rejects_invalid_content_on_non_user_role():
+    """非 user 消息携带非法 content 同样 400(形状校验先于 role 检查)。"""
+    with pytest.raises(ValueError, match="content 必须是字符串或数组"):
+        anthropic_protocol.parse_request(
+            {
+                "messages": [
+                    {"role": "assistant", "content": None},
+                    {"role": "user", "content": "你好"},
+                ]
+            }
+        )

@@ -114,6 +114,27 @@ def test_parse_request_rejects_non_string_text():
         )
 
 
+def test_parse_request_rejects_falsy_image_leaf():
+    """data/file_uri 字段存在但非字符串(如 0)时不得被当作"无图"忽略。"""
+    with pytest.raises(ValueError, match="data 必须是字符串"):
+        gemini_protocol.parse_request(
+            {
+                "contents": [
+                    {
+                        "parts": [
+                            {"text": "看图"},
+                            {"inline_data": {"mime_type": "image/png", "data": 0}},
+                        ]
+                    }
+                ]
+            }
+        )
+    with pytest.raises(ValueError, match="file_uri 必须是字符串"):
+        gemini_protocol.parse_request(
+            {"contents": [{"parts": [{"file_data": {"file_uri": 0}}]}]}
+        )
+
+
 def test_encode_text_vision_part_first():
     payload = gemini_protocol.encode_text("白猫", "视觉分析", "gemini-2.0-flash")
     parts = payload["candidates"][0]["content"]["parts"]

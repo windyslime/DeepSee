@@ -29,9 +29,15 @@ def parse_request(body: dict) -> tuple[str, bytes | str | None]:
     for msg in messages or []:
         if not isinstance(msg, dict):
             raise ValueError("messages 项必须是对象")
+        content = msg.get("content")
+        if "content" in msg and not (
+            isinstance(content, str) or isinstance(content, list)
+        ):
+            # content 字段存在但既非字符串也非数组(含 null/数字/对象),
+            # 对所有 role 生效,不因 role != user 而绕过
+            raise ValueError("content 必须是字符串或数组")
         if msg.get("role") != "user":
             continue
-        content = msg.get("content")
         if isinstance(content, str):
             text = content
         elif isinstance(content, list):
@@ -49,16 +55,19 @@ def parse_request(body: dict) -> tuple[str, bytes | str | None]:
                     if not isinstance(source, dict):
                         raise ValueError("image source 必须是对象")
                     if source.get("type") == "base64":
-                        data = source.get("data", "")
-                        if data:
-                            image = decode_base64_image(data)
+                        if "data" in source:
+                            data = source["data"]
+                            if not isinstance(data, str):
+                                raise ValueError("data 必须是字符串")
+                            if data:
+                                image = decode_base64_image(data)
                     elif source.get("type") == "url":
-                        url = source.get("url", "")
-                        if url:
-                            image = extract_image_from_url(url)
-        elif "content" in msg:
-            # content 字段存在但既非字符串也非数组(含 null/数字/对象)
-            raise ValueError("content 必须是字符串或数组")
+                        if "url" in source:
+                            url = source["url"]
+                            if not isinstance(url, str):
+                                raise ValueError("url 必须是字符串")
+                            if url:
+                                image = extract_image_from_url(url)
     return text, image
 
 

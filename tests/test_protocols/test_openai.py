@@ -129,6 +129,37 @@ def test_parse_request_rejects_invalid_content_type():
         )
 
 
+def test_parse_request_rejects_falsy_image_leaf():
+    """url 字段存在但非字符串(如 0)时不得被当作"无图"忽略。"""
+    with pytest.raises(ValueError, match="url 必须是字符串"):
+        openai_protocol.parse_request(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "看图"},
+                            {"type": "image_url", "image_url": {"url": 0}},
+                        ],
+                    }
+                ]
+            }
+        )
+
+
+def test_parse_request_rejects_invalid_content_on_non_user_role():
+    """非 user 消息携带非法 content 同样 400(形状校验先于 role 检查)。"""
+    with pytest.raises(ValueError, match="content 必须是字符串或数组"):
+        openai_protocol.parse_request(
+            {
+                "messages": [
+                    {"role": "assistant", "content": 123},
+                    {"role": "user", "content": "你好"},
+                ]
+            }
+        )
+
+
 def test_extract_image_from_url_over_limit(sample_image_bytes, monkeypatch):
     monkeypatch.setattr("deepsee_server.protocols.base.MAX_IMAGE_BYTES", 4)
     with pytest.raises(ValueError, match="图片数据过大"):
