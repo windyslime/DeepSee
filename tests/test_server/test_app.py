@@ -6,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
+import deepsee.pipeline.image as image_module
 from deepsee.config.loader import Config, DeepSeekConfig, VisionConfig
 
 from deepsee_server.app import app
@@ -905,8 +906,18 @@ def test_messages_endpoint_content_invalid_type_400(use_cfg):
     assert resp.json()["type"] == "error"
 
 
-def test_chat_ssrf_private_url_400(use_cfg):
-    """私网 URL 图片在真实防护路径被拒绝(不发起连接)→ 400。"""
+def test_chat_ssrf_private_url_400(use_cfg, monkeypatch):
+    """私网 URL 图片在真实防护路径被拒绝,且未创建任何网络传输。"""
+    sent = []
+    orig = image_module._PinnedIPTransport.handle_request
+
+    def tracking(self, request):
+        sent.append(request)
+        return orig(self, request)
+
+    monkeypatch.setattr(
+        image_module._PinnedIPTransport, "handle_request", tracking
+    )
     resp = client.post(
         "/v1/chat/completions",
         json={
@@ -921,10 +932,21 @@ def test_chat_ssrf_private_url_400(use_cfg):
         },
     )
     assert resp.status_code == 400
-    assert "拒绝" in resp.json()["error"]["message"]
+    assert "已拒绝" in resp.json()["error"]["message"]
+    assert sent == []  # 探针:未尝试建立连接
 
 
-def test_messages_endpoint_ssrf_private_url_400(use_cfg):
+def test_messages_endpoint_ssrf_private_url_400(use_cfg, monkeypatch):
+    sent = []
+    orig = image_module._PinnedIPTransport.handle_request
+
+    def tracking(self, request):
+        sent.append(request)
+        return orig(self, request)
+
+    monkeypatch.setattr(
+        image_module._PinnedIPTransport, "handle_request", tracking
+    )
     resp = client.post(
         "/v1/messages",
         json={
@@ -943,9 +965,21 @@ def test_messages_endpoint_ssrf_private_url_400(use_cfg):
     )
     assert resp.status_code == 400
     assert resp.json()["type"] == "error"
+    assert "已拒绝" in resp.json()["error"]["message"]
+    assert sent == []  # 探针:未尝试建立连接
 
 
-def test_gemini_endpoint_ssrf_private_uri_400(use_cfg):
+def test_gemini_endpoint_ssrf_private_uri_400(use_cfg, monkeypatch):
+    sent = []
+    orig = image_module._PinnedIPTransport.handle_request
+
+    def tracking(self, request):
+        sent.append(request)
+        return orig(self, request)
+
+    monkeypatch.setattr(
+        image_module._PinnedIPTransport, "handle_request", tracking
+    )
     resp = client.post(
         "/v1beta/models/m:generateContent",
         json={
@@ -956,10 +990,12 @@ def test_gemini_endpoint_ssrf_private_uri_400(use_cfg):
     )
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == 400
+    assert "已拒绝" in resp.json()["error"]["message"]
+    assert sent == []  # 探针:未尝试建立连接
 
 
 def test_messages_endpoint_base64_over_limit_400(use_cfg, monkeypatch):
-    """Anthropic base64 图片超限必须 400(协议形状)。"""
+    """Anthropic base64 图片超限必须 400,且错误来自字节上限检查。"""
     monkeypatch.setattr("deepsee_server.protocols.base.MAX_IMAGE_BYTES", 64)
     resp = client.post(
         "/v1/messages",
@@ -983,10 +1019,11 @@ def test_messages_endpoint_base64_over_limit_400(use_cfg, monkeypatch):
     )
     assert resp.status_code == 400
     assert resp.json()["type"] == "error"
+    assert "图片数据过大" in resp.json()["error"]["message"]
 
 
 def test_gemini_endpoint_inline_data_over_limit_400(use_cfg, monkeypatch):
-    """Gemini inline_data 图片超限必须 400(协议形状)。"""
+    """Gemini inline_data 图片超限必须 400,且错误来自字节上限检查。"""
     monkeypatch.setattr("deepsee_server.protocols.base.MAX_IMAGE_BYTES", 64)
     resp = client.post(
         "/v1beta/models/m:generateContent",
@@ -1007,6 +1044,7 @@ def test_gemini_endpoint_inline_data_over_limit_400(use_cfg, monkeypatch):
     )
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == 400
+    assert "图片数据过大" in resp.json()["error"]["message"]
 
 
 def test_chat_malformed_400_even_without_config(monkeypatch):
@@ -1033,3 +1071,18 @@ def test_messages_malformed_400_even_without_config(monkeypatch):
     resp = client.post("/v1/messages", json={"messages": None})
     assert resp.status_code == 400
     assert resp.json()["type"] == "error"
+
+
+def test_gemini_malformed_400_even_without_config(monkeypatch):
+    """Gemini 畸形请求在配置缺失时仍返回协议形状 400,而非 500。"""
+    from deepsee.errors import ConfigError
+
+    def no_config():
+        raise ConfigError("缺少 deepseek.api_key")
+
+    monkeypatch.setattr("deepsee_server.app._current_config", no_config)
+    resp = client.post(
+        "/v1beta/models/m:generateContent", json={"contents": None}
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == 400
