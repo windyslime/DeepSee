@@ -133,6 +133,11 @@ OpenAI 端点行为一致);Anthropic 顶层 `system` 字段与 Gemini `system_in
   字符串也非数组(含 null/数字/对象)、`image_url`/`source`/
   `inline_data`/`file_data` 非对象等所有形状错误一律抛 `ValueError`,
   由端点映射为各协议形状的 400 —— 不得以 `TypeError`/框架级 500 泄漏;
+- **形状校验先于提取,且对所有消息生效**:`content` 顶层形状校验在 `role`
+  检查**之前**执行(assistant/system 消息携带非法 `content` 同样 400,不得
+  静默忽略);图片叶子字段(`url`/`data`/`file_uri`)字段**存在**时先校验
+  必须为字符串,再决定空字符串是否表示缺省 —— 假值(0/null/对象)不得
+  绕过类型校验;提取文本/图片仍只从 `role == "user"` 的消息进行;
 - **请求校验先于配置加载**:三个端点先解析并校验请求(畸形请求返回
   协议形状 400),再加载 `_current_config()`;配置缺失时畸形请求仍为 400,
   不得因 `ConfigError` 变成 500;
