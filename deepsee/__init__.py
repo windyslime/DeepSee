@@ -8,6 +8,7 @@ Quickstart::
 
 from deepsee.backends import create_backend
 from deepsee.backends.base import VisionBackend
+from deepsee.composer.chat import chat_async
 from deepsee.composer.deepseek import (
     ask,
     ask_async,
@@ -32,6 +33,7 @@ __all__ = [
     "ask_async",
     "ask_with_image",
     "ask_with_image_async",
+    "chat_async",
     "describe_image",
     "describe_image_async",
     "create_backend",
