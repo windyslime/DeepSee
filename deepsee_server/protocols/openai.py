@@ -147,6 +147,7 @@ async def encode_upstream_stream(
     saw_finish = False
     stream_id: str | None = None
     vision_emitted = False
+    emit_done = False
     try:
         async with contextlib.aclosing(chunks):
             async for chunk in chunks:
@@ -211,6 +212,7 @@ async def encode_upstream_stream(
                     )
                     + "\n\n"
                 ).encode()
+            emit_done = True
     except (ComposeError, VisionBackendError) as exc:
         yield (
             "data: "
@@ -220,8 +222,13 @@ async def encode_upstream_stream(
             )
             + "\n\n"
         ).encode()
+        emit_done = True
     finally:
-        yield b"data: [DONE]\n\n"
+        # A client disconnect closes this async generator with GeneratorExit or
+        # CancelledError. Do not yield from finally in that path: async generators
+        # must finish closing without attempting to write another response chunk.
+        if emit_done:
+            yield b"data: [DONE]\n\n"
 
 
 def parse_request(body: dict) -> tuple[str, bytes | str | None]:

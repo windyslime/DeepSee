@@ -426,3 +426,30 @@ def test_encode_upstream_stream_emits_error_without_success_tail():
     assert b'"type": "upstream_error"' in lines[1]
     assert b'"finish_reason": "stop"' not in b"".join(lines)
     assert lines[-1] == b"data: [DONE]\n\n"
+
+
+def test_encode_upstream_stream_closes_cleanly_on_client_disconnect():
+    closed = False
+
+    async def source():
+        nonlocal closed
+        try:
+            yield {
+                "id": "stable-id",
+                "choices": [
+                    {"delta": {"content": "partial"}, "finish_reason": None}
+                ],
+            }
+            await asyncio.sleep(3600)
+        finally:
+            closed = True
+
+    async def run():
+        stream = openai_protocol.encode_upstream_stream(source())
+        first = await stream.__anext__()
+        await stream.aclose()
+        return first
+
+    first = asyncio.run(run())
+    assert b'"content": "partial"' in first
+    assert closed is True
