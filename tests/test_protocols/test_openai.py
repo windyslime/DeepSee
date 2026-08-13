@@ -4,8 +4,13 @@ import json
 
 import pytest
 
+from deepsee.errors import ComposeError
 from deepsee_server.protocols import openai as openai_protocol
-from deepsee_server.protocols.base import MAX_IMAGE_BYTES, extract_image_from_url
+from deepsee_server.protocols.base import (
+    MAX_IMAGE_BYTES,
+    decode_base64_image,
+    extract_image_from_url,
+)
 
 
 def _data_url(b: bytes, mime: str = "image/png") -> str:
@@ -166,6 +171,21 @@ def test_extract_image_from_url_over_limit(sample_image_bytes, monkeypatch):
         extract_image_from_url(_data_url(sample_image_bytes))
 
 
+@pytest.mark.parametrize(
+    "value",
+    ["data:image/png;base64,!!!!", "data:image/png;base64,"],
+)
+def test_extract_image_from_url_rejects_invalid_or_empty_base64(value):
+    with pytest.raises(ValueError, match="base64"):
+        extract_image_from_url(value)
+
+
+@pytest.mark.parametrize("value", ["!!!!", ""])
+def test_decode_base64_image_rejects_invalid_or_empty_data(value):
+    with pytest.raises(ValueError, match="base64"):
+        decode_base64_image(value)
+
+
 def test_encode_text_carries_vision():
     payload = openai_protocol.encode_text("白猫", "图片里有一只猫", "deepseek-chat")
     assert payload["choices"][0]["message"]["content"] == "白猫"
@@ -225,3 +245,184 @@ def test_encode_stream_empty_chunks_keeps_vision():
     first = json.loads(lines[0][6:])
     assert first["choices"][0]["delta"]["vision_analysis"] == "视觉分析内容"
     assert lines[-1] == "data: [DONE]"
+
+
+def test_parse_chat_request_preserves_full_history_and_params():
+    messages = [
+        {"role": "system", "content": "Use tools."},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "first"},
+                {"type": "text", "text": "second"},
+            ],
+        },
+        {"role": "assistant", "content": None, "tool_calls": []},
+        {"role": "tool", "tool_call_id": "call-1", "content": "done"},
+    ]
+    body = {
+        "model": "client-model",
+        "messages": messages,
+        "stream": False,
+        "tools": [],
+        "tool_choice": "auto",
+        "max_completion_tokens": 100,
+    }
+
+    parsed = openai_protocol.parse_chat_request(body)
+
+    assert parsed.messages == messages
+    assert parsed.stream is False
+    assert parsed.image_count == 0
+    assert parsed.params == {
+        "tools": [],
+        "tool_choice": "auto",
+        "max_completion_tokens": 100,
+    }
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        ({"messages": []}, "不能为空"),
+        ({"messages": [{"role": "developer", "content": "x"}]}, "role"),
+        ({"messages": [{"role": "assistant", "content": None}]}, "content"),
+        ({"messages": [{"role": "user", "content": "x"}], "stream": "false"}, "stream"),
+        ({"messages": [{"role": "user", "content": "x"}], "unexpected": True}, "不支持"),
+    ],
+)
+def test_parse_chat_request_rejects_invalid_shape(body, message):
+    with pytest.raises(ValueError, match=message):
+        openai_protocol.parse_chat_request(body)
+
+
+def test_parse_chat_request_counts_images_and_preserves_unknown_content_blocks():
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "inspect"},
+                {"type": "input_audio", "audio": {"data": "opaque"}},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "https://example.com/a.png"},
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "https://example.com/b.png"},
+                },
+            ],
+        }
+    ]
+
+    parsed = openai_protocol.parse_chat_request({"messages": messages})
+
+    assert parsed.image_count == 2
+    assert parsed.messages == messages
+
+
+def test_encode_upstream_response_preserves_all_fields_and_gates_vision():
+    upstream = {
+        "id": "upstream-id",
+        "object": "chat.completion",
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "reasoning_content": "think",
+                    "tool_calls": [{"id": "call-2"}],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+    }
+
+    standard = openai_protocol.encode_upstream_response(upstream)
+    extended = openai_protocol.encode_upstream_response(
+        upstream, vision="button visible", include_vision=True
+    )
+
+    assert standard == upstream
+    assert "vision_analysis" not in standard["choices"][0]["message"]
+    assert extended["id"] == "upstream-id"
+    assert extended["choices"][0]["message"]["reasoning_content"] == "think"
+    assert extended["choices"][0]["message"]["tool_calls"] == [{"id": "call-2"}]
+    assert extended["choices"][0]["message"]["vision_analysis"] == "button visible"
+    assert "vision_analysis" not in upstream["choices"][0]["message"]
+
+
+def test_encode_upstream_stream_preserves_tool_delta_and_finish_reason():
+    chunks = [
+        {
+            "id": "stable-id",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "deepseek-chat",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {"name": "read", "arguments": "{}"},
+                            }
+                        ]
+                    },
+                    "finish_reason": None,
+                }
+            ],
+        },
+        {
+            "id": "stable-id",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "deepseek-chat",
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+        },
+    ]
+
+    async def run():
+        async def source():
+            for chunk in chunks:
+                yield chunk
+
+        return [
+            line async for line in openai_protocol.encode_upstream_stream(
+                source(), vision="button visible", include_vision=True
+            )
+        ]
+
+    lines = asyncio.run(run())
+    payloads = [json.loads(line[6:]) for line in lines if line.startswith(b"data: ") and line != b"data: [DONE]\n\n"]
+    assert [payload["id"] for payload in payloads] == ["stable-id"] * 3
+    assert payloads[0]["choices"][0]["delta"]["vision_analysis"] == "button visible"
+    assert payloads[1]["choices"][0]["delta"]["tool_calls"][0]["id"] == "call-1"
+    assert payloads[2]["choices"][0]["finish_reason"] == "tool_calls"
+    assert lines[-1] == b"data: [DONE]\n\n"
+
+
+def test_encode_upstream_stream_emits_error_without_success_tail():
+    async def source():
+        yield {
+            "id": "stable-id",
+            "choices": [{"delta": {"content": "partial"}, "finish_reason": None}],
+        }
+        raise ComposeError("upstream failed")
+
+    async def run():
+        return [
+            line
+            async for line in openai_protocol.encode_upstream_stream(source())
+        ]
+
+    lines = asyncio.run(run())
+    assert b'"content": "partial"' in lines[0]
+    assert b'"type": "upstream_error"' in lines[1]
+    assert b'"finish_reason": "stop"' not in b"".join(lines)
+    assert lines[-1] == b"data: [DONE]\n\n"
