@@ -1,7 +1,7 @@
 # DeepSee × DeepSeek Harness 视觉集成设计
 
 日期: 2026-08-15
-状态: 已批准，DeepSee 服务端 DSV 垂直切片已实现；DSH 插件待在外部 DSH 仓库实施
+状态: 已批准并实现；DeepSee 服务端 DSV 垂直切片与 `@deepseek-ai/dsh-llm-dsv` 插件均已落地
 范围: DeepSee(视觉层)与 DeepSeek Harness(DSH,智能体框架)的集成
 
 ## 1. 目标与范围
@@ -180,14 +180,15 @@ DeepSee 内部已经把视觉分析注入本轮 DeepSeek 上下文；DSH 不把 
 
 插件实现遵循 DSH 基础开发契约：TypeScript 模块导出 `apply(ctx)`；需要服务时声明 `inject`；通过 Cordis waterfall 事件路由请求；通过标准 LLM 和工具服务注册能力。插件包建议命名为 `@deepseek-ai/dsh-llm-dsv`。插件是 DSV 客户端/适配器，不包含视觉模型编排逻辑。
 
-以下路径来自 DSH 0.1.0-rc 的当前结构，实施前应以实际仓库版本复核：
+以下路径与机制已经在 DSH `feat/dsh-llm-dsv` 分支实现：
 
-- 插件入口：`export const name`、`export const inject`、`export function apply(ctx, config)`；至少依赖 `llm`，追问工具额外依赖 `tools`。
-- `@deepseek-ai/dsh-llm` 的 `LlmAdapter` / `StreamChunk`：实现一个 DSV 请求适配器，负责把 DSH 消息和 DSV SSE 响应转换为 Harness 分片；新增 `vision-analysis` 分片类型。
+- `packages/llm/llm-dsv/src/index.ts`：导出 `name`、`inject` 和 `apply(ctx, config)`，挂载图片路由与追问工具；依赖 `llm`、`tools` 和 `attachments`。
+- `packages/llm/llm-dsv/src/types.ts`：通过 declaration merging 扩展 `@deepseek-ai/dsh-llm` 的 `ContentBlockMap`，把 `vision-analysis` 定义为助手消息中的独立、仅展示内容块。
+- `packages/llm/llm-dsv/src/client.ts`、`serialize.ts`、`sse.ts` 和 `translate.ts`：负责请求序列化、DSV fetch 与 idle watchdog、SSE 帧解析，以及按 `event.type` 翻译为 Harness `StreamChunk`。
 - `ctx.on('llm/stream', (options, next) => ...)`：使用 waterfall 事件检测 `contentHasImage(options.messages)`；无图片必须调用 `next()`，有图片时短路下游并调用 DSV adapter。
-- `packages/llm/llm/src/types.ts`：通过 declaration merging 扩展 `ContentBlockMap`，增加 `vision-analysis` 内容块；扩展 `StreamChunk`、assembler 和相关 UI/持久化支持。
-- `packages/core/agent-loop`：识别 `vision-analysis` 分片并保存为识图事件，不把它放进 assistant message 或下一轮模型历史。
-- `packages/core/session`：增加 log-only 的 `vision/analysis` 事件；该事件不属于 model-visible surface，但必须可持久化、回放和通过 session event stream 推送。
+- `packages/core/session/src/surface.ts`：在唯一的 `deriveEventMessage` 投影点递归过滤 `vision-analysis`，包括嵌套工具结果中的内容块；各 provider 不再维护自己的过滤逻辑。
+- `packages/client/runtime/src/client/sessions/conversation.ts`：把助手消息中的 `vision-analysis` 分类为客户端可识别的独立块，同时保留非敏感元数据。
+- `packages/client/ui-conversation/src/client/chat/VisionAnalysisRow.tsx`：使用 Think 同款 disclosure 交互、图片图标和本地化文本渲染初轮与追问识图结果。
 - `packages/llm/llm/src/content.ts`：复用 `contentHasImage` 判断图片请求。
 - `packages/llm/llm-deepseek/src/serialize.ts`：作为现有 `UNSUPPORTED_CONTENT` 行为和消息形状的参考；第一版不直接修改该包的序列化逻辑。
 - `packages/llm/llm-pi-ai/src/context.ts`：参考图片附件和上下文解析方式。
@@ -198,7 +199,7 @@ DeepSee 内部已经把视觉分析注入本轮 DeepSeek 上下文；DSH 不把 
 - `packages/client/ui-conversation/src/client/contract/slots.ts`：确认节点级槽位是否足以承载识图栏。
 - `packages/client/ui-conversation` 的助手内容块 switch：增加识图段渲染。
 
-`llm/stream` waterfall 是自动路由的首选扩展点，因此不需要覆盖 `deepseek-official` 适配器注册，也不需要在核心序列化器中加入 DeepSee 特判。DSV adapter 只在含图片时接管请求；它只消费 DSV SSE，不直接调用视觉 API。若 DSH 当前版本不能从插件扩展 `ContentBlockMap`、`StreamChunk` 或 assistant 内容块渲染，再使用已有节点级槽位作为兼容实现；视觉栏的最终语义仍应是助手消息附属内容，而不是普通工具结果。
+`llm/stream` waterfall 是自动路由扩展点，因此无需覆盖 `deepseek-official` 适配器注册，也无需在核心序列化器中加入 DeepSee 特判。DSV adapter 只在含图片的普通会话请求中接管流；无图请求和带 `purpose` 的辅助请求继续 `next()`。识图结果已经作为 declaration-merged 助手内容块进入持久化、回放和导出，在统一 surface 投影处从后续模型历史删除，并由客户端节点分类与折叠行渲染；它不是独立的 session 事件，也不是普通工具结果。
 
 ## 6. 配置与网关部署边界
 
