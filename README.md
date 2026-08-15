@@ -87,14 +87,86 @@ asyncio.run(main())
 另有 `ask_async`(纯文本)与 `describe_image_async`(仅视觉分析)。
 错误语义与同步接口一致;图片处理(含 SSRF 防护)复用同一套同步管线。
 
+## 本地网关
+
+安装 server 依赖后启动网关:
+
+```bash
+pip install "seedeep[server]"
+deepsee-server
+```
+
+网关默认启用入站鉴权。首次启动会创建一组 public/admin key,明文只在该次
+启动输出,磁盘中的 `~/.config/deepsee/api-keys.json` 只保存 SHA-256 摘要。
+普通推理和模型列表使用 public key:
+
+```bash
+curl http://127.0.0.1:8712/v1/models \
+  -H "Authorization: Bearer <public-key>"
+```
+
+`/admin/*` 管理端点使用独立的 admin key,通过
+`X-DeepSee-Admin-Key: <admin-key>` 传递。需要补发密钥时运行
+`deepsee-server --create-recovery-keys`;旧 key 保持有效,可通过管理 API 撤销。
+
+临时本机开发可以显式关闭鉴权,但仅允许 loopback 地址:
+
+```bash
+deepsee-server --no-auth --host 127.0.0.1
+```
+
+默认每个身份每 60 秒最多 60 个推理请求,全局最多 8 个并发推理请求,并发队列
+最多等待 2 秒。可用 `DeepSee_RATE_LIMIT_REQUESTS`、
+`DeepSee_RATE_LIMIT_WINDOW`、`DeepSee_MAX_CONCURRENT_REQUESTS` 和
+`DeepSee_REQUEST_QUEUE_TIMEOUT` 覆盖。计数只在当前进程内共享;多 worker 或多
+实例部署还需要在反向代理层配置共享限速。
+
 ## 多协议端点
 
-服务同时暴露三种协议形状的聊天端点,视觉分析结果作为响应元数据返回,
+### DSV 公开编排端点
+
+`POST /v1/dsv` 是 DeepSee 对外提供的视觉编排/输出协议。客户端只提交图片、消息、
+DeepSeek 模型和工具 schema；DeepSee 在内部调用配置的 OpenAI-compatible 视觉 API,
+再编排 DeepSeek 推理。视觉 provider 的 `api_key` 不属于 DSV 请求体,也不会返回给
+客户端。DSV v1 当前要求 `[vision].backend = "openai_compatible"`。
+
+请求中的图片可以使用 DSV 原生 base64 形状,工具结果继续使用 OpenAI-compatible 的
+`role: "tool"` 消息回传:
+
+```json
+{
+  "model": "deepseek-chat",
+  "stream": true,
+  "messages": [{
+    "role": "user",
+    "content": [
+      {"type": "text", "text": "这张图里有什么?"},
+      {"type": "image", "source": {
+        "type": "base64",
+        "media_type": "image/png",
+        "data": "<BASE64>"
+      }}
+    ]
+  }],
+  "tools": [],
+  "vision": {"mode": "auto", "include_analysis": true}
+}
+```
+
+SSE 流首先发送 `response.created`、`vision.started` 和完整的
+`vision.completed`，随后发送 `reasoning.delta`、`answer.delta` 或
+`tool_call.delta`。工具调用结束时发送 `response.requires_action`；调用方执行自己
+的工具后，把结果作为下一次 DSV 请求的 `role: "tool"` 消息提交。DeepSee 不执行
+调用方的工具。非流式响应将 `vision`、`answer`、`reasoning`、`tool_calls` 和
+`usage` 保持为独立字段。
+
+服务同时暴露三种协议形状的聊天端点。视觉分析可以作为响应元数据返回,
 供 GUI 像展开思考过程一样点击查看(字段语义 = "模型看到了什么"):
 
-- `POST /v1/chat/completions` — OpenAI 兼容;有图时非流式响应
-  `choices[0].message.vision_analysis`;流式响应以独立前置 chunk 发出
-  `choices[0].delta.vision_analysis`(不含 `content`),随后是回答文本 chunk;
+- `POST /v1/chat/completions` — OpenAI 兼容;仅当请求包含
+  `X-DeepSee-Include-Vision: 1` 时,有图的非流式响应带
+  `choices[0].message.vision_analysis`,流式响应以独立前置 chunk 发出
+  `choices[0].delta.vision_analysis`(不含 `content`),随后是上游响应 chunk;
 - `POST /v1/messages` — Anthropic messages 形状;非流式响应顶层
   `vision_analysis`;流式响应在 `message_start` 后发
   `{"type": "vision_analysis", "vision": ...}` 事件;
@@ -110,7 +182,10 @@ asyncio.run(main())
 
 ```bash
 # OpenAI 兼容
-curl -N http://127.0.0.1:8712/v1/chat/completions -H "Content-Type: application/json" -d '{
+curl -N http://127.0.0.1:8712/v1/chat/completions \
+  -H "Authorization: Bearer <public-key>" \
+  -H "X-DeepSee-Include-Vision: 1" \
+  -H "Content-Type: application/json" -d '{
   "stream": true,
   "messages": [{"role": "user", "content": [
     {"type": "text", "text": "这张图里有什么?"},
@@ -121,7 +196,9 @@ curl -N http://127.0.0.1:8712/v1/chat/completions -H "Content-Type: application/
 #       之后 chunk 为 {"choices":[{"delta":{"content":"..."}}]},最后 data: [DONE]
 
 # Anthropic messages
-curl -N http://127.0.0.1:8712/v1/messages -H "Content-Type: application/json" -d '{
+curl -N http://127.0.0.1:8712/v1/messages \
+  -H "Authorization: Bearer <public-key>" \
+  -H "Content-Type: application/json" -d '{
   "model": "claude-3-5-sonnet",
   "max_tokens": 1024,
   "stream": true,
@@ -133,7 +210,9 @@ curl -N http://127.0.0.1:8712/v1/messages -H "Content-Type: application/json" -d
 # 响应:message_start → {"type":"vision_analysis","vision":"..."} → content_block_delta(text) → message_stop
 
 # Gemini generateContent
-curl -N http://127.0.0.1:8712/v1beta/models/gemini-2.0-flash:generateContent -H "Content-Type: application/json" -d '{
+curl -N http://127.0.0.1:8712/v1beta/models/gemini-2.0-flash:generateContent \
+  -H "Authorization: Bearer <public-key>" \
+  -H "Content-Type: application/json" -d '{
   "stream": true,
   "contents": [{"parts": [
     {"inline_data": {"mime_type": "image/png", "data": "<BASE64>"}},
@@ -145,9 +224,14 @@ curl -N http://127.0.0.1:8712/v1beta/models/gemini-2.0-flash:generateContent -H 
 
 ## 安全限制
 
-图片加载对所有服务化图片入口统一生效(`/v1/chat/completions` 的
-`image_url`、`/v1/messages` 的 `source.url`/base64、`/v1beta/models/{model}:generateContent`
-的 `file_data.file_uri`/`inline_data`、`/analyze`):
+网关对模型、推理和分析端点强制 public key,对 `/admin/*` 强制 admin key;
+直接导入 ASGI app 但未配置鉴权时 fail closed,只有 `/health` 保持公开。速率和
+并发保护覆盖完整流式响应生命周期,客户端取消或上游异常后会释放并发名额。
+
+图片加载对所有服务化图片入口统一生效(`/v1/dsv` 的 `image.source`/`image_url`、
+`/v1/chat/completions` 的 `image_url`、`/v1/messages` 的 `source.url`/base64、
+`/v1beta/models/{model}:generateContent` 的 `file_data.file_uri`/`inline_data`、
+`/analyze`):
 
 - **SSRF 防护**:http(s) URL 的主机(含每一跳重定向目标)解析到私网、loopback、
   link-local、保留或特殊用途地址(如 `127.0.0.1`、`169.254.169.254`)时拒绝下载。
@@ -163,6 +247,10 @@ curl -N http://127.0.0.1:8712/v1beta/models/gemini-2.0-flash:generateContent -H 
   字节上限按原始字节流式累计(扩容前检查),防止大响应与解压炸弹耗尽内存;
 - **请求体上限**:服务端请求体超过 32 MiB 返回 413,请求体流式读取,
   无 `Content-Length` 的 chunked 请求同样受限;
+- **推理成本上限**:默认最多 100 条消息/内容、4 张图片、20 万文本字符;
+  未指定输出长度时使用 4096 tokens,单次最多 8192 tokens。可通过
+  `DeepSee_MAX_MESSAGES`、`DeepSee_MAX_IMAGES`、`DeepSee_MAX_TEXT_CHARS`、
+  `DeepSee_DEFAULT_MAX_OUTPUT_TOKENS` 和 `DeepSee_MAX_OUTPUT_TOKENS` 覆盖;
 - **流式超时**:DeepSeek 流式响应的 HTTP 帧间超时 120 秒(完全静默的上游
   120 秒后报错),另有总时长上限 300 秒(`deepsee/composer/deepseek.py`
   的 `_STREAM_TOTAL_TIMEOUT`)—— 持续发送 SSE keepalive 却永不 `[DONE]`

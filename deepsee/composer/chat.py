@@ -21,13 +21,14 @@ async def chat_async(
     stream: bool = False,
     config: Config | None = None,
     params: Mapping[str, Any] | None = None,
+    model: str | None = None,
 ) -> dict[str, Any] | AsyncIterator[dict[str, Any]]:
     """Call DeepSeek without flattening messages or response objects."""
     cfg = config if config is not None else load_config()
     payload = copy.deepcopy(dict(params or {}))
     payload.update(
         {
-            "model": cfg.deepseek.model,
+            "model": model or cfg.deepseek.model,
             "messages": copy.deepcopy(list(messages)),
             "stream": stream,
         }
