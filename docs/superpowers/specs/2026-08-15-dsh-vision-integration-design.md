@@ -35,17 +35,19 @@ DeepSee 负责图片校验、SSRF 防护、视觉分析、上下文注入和 Dee
 
 ### 3.2 DSH 设置
 
-DSH 设置界面注册视觉配置 namespace，提供以下字段：
+插件通过 `ctx.settings` 注册一个小写 kebab-case 的视觉配置 namespace。配置 schema 负责 UI 表单生成和字段校验；这不是把密钥写进插件的普通 `Config` 或 `cordis.yml`。
+
+设置界面提供以下用户字段（实现内部可使用 camelCase 名称）：
 
 | 字段 | 说明 |
 | --- | --- |
 | `backend` | `openai_compatible`、`anthropic` 或 `gemini` |
-| `api_key` | 视觉服务密钥，写入 DSH credentials seam |
+| `api_key` | 视觉服务密钥；设置层只保存 credential reference，真实值由 `ctx.credentials` 保存 |
 | `base_url` | 视觉服务地址 |
 | `model` | 视觉模型名称 |
 | `mode` | 默认 `auto`，可选 `ui`、`general` |
 
-设置修改后下一次请求立即生效。凭证与普通设置分开保存；设置页只显示是否已配置，不回显密钥。密钥不得出现在日志、错误消息、请求追踪或导出数据中。
+namespace 使用 `applies: 'live'`，设置更新通过 scope 的 `watch()` 进入下一次请求；配置变更不需要重启。凭证按每次请求重新 `resolve()`，轮换后的密钥对紧随其后的请求生效。设置描述和凭证描述必须使用脱敏模式，设置页只显示是否已配置，不回显密钥。密钥不得出现在日志、错误消息、请求追踪或导出数据中。
 
 ### 3.3 初轮识图栏
 
@@ -63,7 +65,7 @@ DSH 设置界面注册视觉配置 namespace，提供以下字段：
 
 ### 3.4 识图追问工具
 
-注册 `deepsee_vision_detail` 工具，入参至少包含 `question`。工具由 DeepSeek 主动调用，不由插件根据关键词自动猜测。
+插件以标准 Cordis 模块导出 `name`、`inject` 和 `apply(ctx)`，并通过 `@deepseek-ai/dsh-tools` 的 `defineTool()` 与 `ctx.tools.register()` 注册 `deepsee_vision_detail`。工具入参至少包含 `question`，由 DeepSeek 主动调用，不由插件根据关键词自动猜测。工具结果同时提供面向模型的规范值和面向 UI 的 `output.render` 内容。
 
 追问流程：
 
@@ -113,18 +115,25 @@ DSH 设置界面注册视觉配置 namespace，提供以下字段：
 
 ## 5. DSH 实现切入点
 
+插件实现遵循 DSH 基础开发契约：TypeScript 模块导出 `apply(ctx)`；需要服务时声明 `inject`；通过 Cordis waterfall 事件拦截请求；通过标准 LLM 和工具服务注册能力。
+
 以下路径来自 DSH 0.1.0-rc 的当前结构，实施前应以实际仓库版本复核：
 
-- `packages/llm/llm/src/types.ts`：扩展内容块类型，增加 vision-analysis 内容块或等价内部类型。
+- 插件入口：`export const name`、`export const inject`、`export function apply(ctx, config)`；至少依赖 `llm`，追问工具额外依赖 `tools`。
+- `@deepseek-ai/dsh-llm` 的 `LlmAdapter` / `StreamChunk`：实现一个 DeepSee 请求适配器，负责把 DSH 消息和 DeepSee SSE 响应转换为 Harness 分片。
+- `ctx.on('llm/stream', (options, next) => ...)`：使用 waterfall 事件检测 `contentHasImage(options.messages)`；无图片必须调用 `next()`，有图片时短路下游并调用 DeepSee 适配器。
+- `packages/llm/llm/src/types.ts`：通过 declaration merging 扩展 `ContentBlockMap`，增加 `vision-analysis` 内容块；同时扩展 `StreamChunk` 相关 UI/持久化支持。
 - `packages/llm/llm/src/content.ts`：复用 `contentHasImage` 判断图片请求。
-- `packages/llm/llm-deepseek/src/serialize.ts`：拦截当前 `UNSUPPORTED_CONTENT` 分支，交给 DeepSee 路由。
+- `packages/llm/llm-deepseek/src/serialize.ts`：作为现有 `UNSUPPORTED_CONTENT` 行为和消息形状的参考；第一版不直接修改该包的序列化逻辑。
 - `packages/llm/llm-pi-ai/src/context.ts`：参考图片附件和上下文解析方式。
+- `@deepseek-ai/dsh-settings`：参考 `settingsNamespace`、schema 注册、`installSettingsSection`/scope `watch` 和 live 更新。
+- `@deepseek-ai/dsh-credentials`：使用 credential reference 和按请求解析，避免把 API key 作为设置值传输。
+- `@deepseek-ai/dsh-tools`：使用 `defineTool`、`output.schema`、`output.render` 和 `ctx.tools.register` 注册追问工具。
 - `packages/client/ui-conversation/src/client/chat/ReasoningRow.tsx`：复用 Think 行的展示和折叠交互。
 - `packages/client/ui-conversation/src/client/contract/slots.ts`：确认节点级槽位是否足以承载识图栏。
 - `packages/client/ui-conversation` 的助手内容块 switch：增加识图段渲染。
-- DSH 插件 settings seam：注册视觉配置 namespace 和 credentials seam。
 
-如果 DSH 的插件槽无法注入助手内容块，才使用已有节点级槽位作为兼容实现；视觉栏的最终语义仍应是助手消息附属内容，而不是普通工具结果。
+`llm/stream` waterfall 是自动路由的首选扩展点，因此不需要覆盖 `deepseek-official` 适配器注册，也不需要在核心序列化器中加入 DeepSee 特判。如果 DSH 当前版本不能从插件扩展 `ContentBlockMap` 或助手内容块渲染，再使用已有节点级槽位作为兼容实现；视觉栏的最终语义仍应是助手消息附属内容，而不是普通工具结果。
 
 ## 6. 配置与网关部署边界
 
@@ -197,3 +206,12 @@ DSH 侧：
 - `packages/llm/llm-pi-ai/src/context.ts`
 - `packages/client/ui-conversation/src/client/chat/ReasoningRow.tsx`
 - `packages/client/ui-conversation/src/client/contract/slots.ts`
+
+官方开发参考：
+
+- [第一个插件](https://deepseek-harness.github.io/deepseek-harness/develop/basic/)
+- [插件配置](https://deepseek-harness.github.io/deepseek-harness/develop/basic/config/)
+- [开发一个工具](https://deepseek-harness.github.io/deepseek-harness/develop/basic/tool/)
+- [LLM 适配器](https://deepseek-harness.github.io/deepseek-harness/develop/practice/llm-adapter)
+- [用户设置](https://deepseek-harness.github.io/deepseek-harness/reference/subsystems/settings)
+- [用户凭据](https://deepseek-harness.github.io/deepseek-harness/reference/subsystems/credentials)
