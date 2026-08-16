@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "releaseVersion": "0.1.0",
+  "releaseTag": "dsh-dsv-v0.1.0",
+  "assetName": "deepsee-dsh-dsv-v0.1.0.tar.gz",
+  "harnessRepository": "https://github.com/deepseek-ai/deepseek-harness.git",
+  "harnessCommit": "58fded97234e744c02fd165cfed9632cf6ccc61e",
+  "dshCompatibility": "0.1.0-rc.5",
+  "packages": [
+    {
+      "name": "@deepseek-ai/dsh-llm-dsv",
+      "source": "packages/llm/llm-dsv"
+    },
+    {
+      "name": "@deepseek-ai/dsh-session",
+      "source": "packages/core/session"
+    },
+    {
+      "name": "@deepseek-ai/dsh-client-runtime",
+      "source": "packages/client/runtime"
+    },
+    {
+      "name": "@deepseek-ai/dsh-client-ui-conversation",
+      "source": "packages/client/ui-conversation"
+    },
+    {
+      "name": "@deepseek-ai/dsh-client-ui-primitives",
+      "source": "packages/client/ui-primitives"
+    },
+    {
+      "name": "@deepseek-ai/dsh-client-ui-tool",
+      "source": "packages/client/ui-tool"
+    },
+    {
+      "name": "@deepseek-ai/dsh-client-ui-trajectory",
+      "source": "packages/client/ui-trajectory"
+    },
+    {
+      "name": "@deepseek-ai/dsh-cordis-client-runner",
+      "source": "packages/extensions/cordis-client-runner"
+    },
+    {
+      "name": "@deepseek-ai/dsh-web-app",
+      "source": "packages/bundle/web-app",
+      "releaseVersion": "0.1.0-dsv.1",
+      "rewriteWebFrontendDependency": true
+    },
+    {
+      "name": "@deepseek-ai/dsh-web-frontend",
+      "source": "apps/web"
+    }
+  ]
+}
