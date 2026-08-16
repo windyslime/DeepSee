@@ -168,6 +168,10 @@ def uninstall(profile: Path, asset_root: Path, dry_run: bool) -> None:
         changed = True
         if not dry_run:
             del overrides[WEB_FRONTEND]
+            if not overrides:
+                del package_manager["overrides"]
+            if not package_manager:
+                package.pop("pnpm", None)
     next_patch = _patched_text(patch, installing=False)
     changed = changed or next_patch != patch
     if not dry_run:

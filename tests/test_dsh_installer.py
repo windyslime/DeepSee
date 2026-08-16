@@ -99,6 +99,7 @@ def test_verify_and_uninstall_remove_only_managed_layer(tmp_path: Path):
     patch = (profile / "cordis.patch.yml").read_text(encoding="utf-8")
     assert "id: unrelated" in patch
     assert "id: llm-dsv" not in patch
+    assert "pnpm" not in package
 
 
 def test_uninstall_turns_comment_only_patch_into_empty_list(tmp_path: Path):
