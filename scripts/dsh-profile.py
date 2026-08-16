@@ -1,0 +1,190 @@
+#!/usr/bin/env python3
+"""Apply the managed DeepSee DSV layer to one DSH profile."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from pathlib import Path, PurePosixPath
+from typing import Any
+
+
+START_MARKER = "# >>> deepsee-dsv managed layer >>>"
+END_MARKER = "# <<< deepsee-dsv managed layer <<<"
+PATCH_BLOCK = (
+    f"{START_MARKER}\n"
+    "- insert:\n"
+    "    - id: llm-dsv\n"
+    "      name: '@deepseek-ai/dsh-llm-dsv'\n"
+    f"{END_MARKER}\n"
+)
+LLM_DSV_ROW = re.compile(r"^\s*-\s+id:\s*llm-dsv\s*$", re.MULTILINE)
+MANAGED_BLOCK = re.compile(
+    rf"^{re.escape(START_MARKER)}\n.*?^{re.escape(END_MARKER)}\n?",
+    re.MULTILINE | re.DOTALL,
+)
+
+
+class ProfileError(ValueError):
+    """Raised when a DSH profile cannot be safely changed."""
+
+
+def _load_manifest(asset_root: Path) -> dict[str, Any]:
+    manifest_path = asset_root / "manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ProfileError(f"cannot read asset manifest: {manifest_path}") from exc
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("packages"), list):
+        raise ProfileError("asset manifest has no package list")
+    return manifest
+
+
+def _asset_dependencies(asset_root: Path, manifest: dict[str, Any]) -> dict[str, str]:
+    dependencies: dict[str, str] = {}
+    for entry in manifest["packages"]:
+        if not isinstance(entry, dict):
+            raise ProfileError("asset manifest contains a non-object package")
+        name = entry.get("name")
+        relative = entry.get("path")
+        if not isinstance(name, str) or not isinstance(relative, str):
+            raise ProfileError("asset package entries require name and path")
+        path = PurePosixPath(relative)
+        if path.is_absolute() or ".." in path.parts or not relative.startswith("packages/"):
+            raise ProfileError(f"unsafe package path in manifest: {relative}")
+        package_path = asset_root / Path(relative)
+        if not package_path.is_file():
+            raise ProfileError(f"asset package is missing: {relative}")
+        dependencies[name] = f"file:{package_path}"
+    return dependencies
+
+
+def _read_profile(profile: Path) -> tuple[Path, dict[str, Any], str]:
+    package_path = profile / "package.json"
+    patch_path = profile / "cordis.patch.yml"
+    if not package_path.is_file():
+        raise ProfileError(f"DSH profile package.json is missing: {package_path}")
+    try:
+        package = json.loads(package_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ProfileError(f"cannot read profile package.json: {package_path}") from exc
+    if not isinstance(package, dict):
+        raise ProfileError("profile package.json must contain an object")
+    patch = patch_path.read_text(encoding="utf-8") if patch_path.exists() else ""
+    return package_path, package, patch
+
+
+def _patched_text(patch: str, installing: bool) -> str:
+    if installing:
+        if START_MARKER in patch or LLM_DSV_ROW.search(patch):
+            return patch
+        if patch.strip() == "[]":
+            return PATCH_BLOCK
+        prefix = "" if not patch or patch.endswith("\n") else "\n"
+        return f"{patch}{prefix}{PATCH_BLOCK}"
+    return MANAGED_BLOCK.sub("", patch)
+
+
+def _write_json(path: Path, value: dict[str, Any]) -> None:
+    temporary = path.with_suffix(f"{path.suffix}.deepsee-tmp")
+    temporary.write_text(
+        json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    temporary.replace(path)
+
+
+def _write_text(path: Path, value: str) -> None:
+    temporary = path.with_suffix(f"{path.suffix}.deepsee-tmp")
+    temporary.write_text(value, encoding="utf-8")
+    temporary.replace(path)
+
+
+def _result(action: str, changed: bool, manifest: dict[str, Any], profile: Path) -> None:
+    print(json.dumps({
+        "ok": True,
+        "action": action,
+        "changed": changed,
+        "profile": str(profile),
+        "version": manifest.get("releaseVersion"),
+    }, ensure_ascii=False))
+
+
+def install(profile: Path, asset_root: Path, dry_run: bool) -> None:
+    package_path, package, patch = _read_profile(profile)
+    manifest = _load_manifest(asset_root)
+    dependencies = _asset_dependencies(asset_root, manifest)
+    current_dependencies = package.setdefault("dependencies", {})
+    if not isinstance(current_dependencies, dict):
+        raise ProfileError("profile dependencies must be an object")
+    changed = any(current_dependencies.get(name) != value for name, value in dependencies.items())
+    next_patch = _patched_text(patch, installing=True)
+    changed = changed or next_patch != patch
+    if not dry_run:
+        for name, value in dependencies.items():
+            current_dependencies[name] = value
+        _write_json(package_path, package)
+        _write_text(profile / "cordis.patch.yml", next_patch)
+    _result("install", changed, manifest, profile)
+
+
+def uninstall(profile: Path, asset_root: Path, dry_run: bool) -> None:
+    package_path, package, patch = _read_profile(profile)
+    manifest = _load_manifest(asset_root)
+    dependencies = _asset_dependencies(asset_root, manifest)
+    current_dependencies = package.get("dependencies", {})
+    if not isinstance(current_dependencies, dict):
+        raise ProfileError("profile dependencies must be an object")
+    changed = False
+    for name, expected in dependencies.items():
+        if current_dependencies.get(name) == expected:
+            changed = True
+            if not dry_run:
+                del current_dependencies[name]
+    next_patch = _patched_text(patch, installing=False)
+    changed = changed or next_patch != patch
+    if not dry_run:
+        _write_json(package_path, package)
+        if next_patch:
+            _write_text(profile / "cordis.patch.yml", next_patch)
+    _result("uninstall", changed, manifest, profile)
+
+
+def verify(profile: Path, asset_root: Path) -> None:
+    _, package, patch = _read_profile(profile)
+    manifest = _load_manifest(asset_root)
+    dependencies = _asset_dependencies(asset_root, manifest)
+    current_dependencies = package.get("dependencies", {})
+    if not isinstance(current_dependencies, dict):
+        raise ProfileError("profile dependencies must be an object")
+    missing = [name for name, value in dependencies.items() if current_dependencies.get(name) != value]
+    if missing:
+        raise ProfileError(f"profile is missing managed dependencies: {', '.join(missing)}")
+    if not (START_MARKER in patch or LLM_DSV_ROW.search(patch)):
+        raise ProfileError("profile patch does not contain the llm-dsv row")
+    _result("verify", False, manifest, profile)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("action", choices=("install", "uninstall", "verify"))
+    parser.add_argument("--profile", required=True, type=Path)
+    parser.add_argument("--asset-root", required=True, type=Path)
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args(argv)
+    try:
+        if args.action == "install":
+            install(args.profile, args.asset_root, args.dry_run)
+        elif args.action == "uninstall":
+            uninstall(args.profile, args.asset_root, args.dry_run)
+        else:
+            verify(args.profile, args.asset_root)
+    except (OSError, ProfileError) as exc:
+        print(f"profile operation failed: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
