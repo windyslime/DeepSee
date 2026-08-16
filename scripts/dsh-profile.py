@@ -9,18 +9,15 @@ import re
 import sys
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import urlsplit
 
 
 START_MARKER = "# >>> deepsee-dsv managed layer >>>"
 END_MARKER = "# <<< deepsee-dsv managed layer <<<"
 WEB_FRONTEND = "@deepseek-ai/dsh-web-frontend"
-PATCH_BLOCK = (
-    f"{START_MARKER}\n"
-    "- insert:\n"
-    "    - id: llm-dsv\n"
-    "      name: '@deepseek-ai/dsh-llm-dsv'\n"
-    f"{END_MARKER}\n"
-)
+DEFAULT_GATEWAY_URL = "http://127.0.0.1:8712"
+DEFAULT_API_KEY_REF = "DEEPSEE_DSV_API_KEY"
+API_KEY_REF_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 LLM_DSV_ROW = re.compile(r"^\s*-\s+id:\s*llm-dsv\s*$", re.MULTILINE)
 MANAGED_BLOCK = re.compile(
     rf"^{re.escape(START_MARKER)}\n.*?^{re.escape(END_MARKER)}\n?",
@@ -30,6 +27,38 @@ MANAGED_BLOCK = re.compile(
 
 class ProfileError(ValueError):
     """Raised when a DSH profile cannot be safely changed."""
+
+
+def _validate_options(gateway_url: str | None, api_key_ref: str | None) -> None:
+    if gateway_url is None and api_key_ref is None:
+        return
+    if gateway_url is None or api_key_ref is None:
+        raise ProfileError("gateway URL and API key reference must be provided together")
+    parsed = urlsplit(gateway_url)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        raise ProfileError("gateway URL must use http:// or https:// and include a host")
+    if parsed.username is not None or parsed.password is not None:
+        raise ProfileError("gateway URL must not contain user info")
+    if any(character.isspace() for character in gateway_url) or "#" in gateway_url:
+        raise ProfileError("gateway URL must not contain whitespace or a fragment")
+    if not API_KEY_REF_RE.fullmatch(api_key_ref):
+        raise ProfileError("API key reference must be an uppercase environment name")
+
+
+def _patch_block(gateway_url: str | None, api_key_ref: str | None) -> str:
+    block = (
+        f"{START_MARKER}\n"
+        "- insert:\n"
+        "    - id: llm-dsv\n"
+        "      name: '@deepseek-ai/dsh-llm-dsv'\n"
+    )
+    if gateway_url is not None and api_key_ref is not None:
+        block += (
+            "      config:\n"
+            f"        baseURL: {gateway_url}\n"
+            f"        apiKeyEnv: {api_key_ref}\n"
+        )
+    return f"{block}{END_MARKER}\n"
 
 
 def _load_manifest(asset_root: Path) -> dict[str, Any]:
@@ -77,14 +106,24 @@ def _read_profile(profile: Path) -> tuple[Path, dict[str, Any], str]:
     return package_path, package, patch
 
 
-def _patched_text(patch: str, installing: bool) -> str:
+def _patched_text(
+    patch: str,
+    installing: bool,
+    gateway_url: str | None = None,
+    api_key_ref: str | None = None,
+) -> str:
     if installing:
-        if START_MARKER in patch or LLM_DSV_ROW.search(patch):
+        block = _patch_block(gateway_url, api_key_ref)
+        if START_MARKER in patch:
+            if gateway_url is None and api_key_ref is None:
+                return patch
+            return MANAGED_BLOCK.sub(block, patch)
+        if LLM_DSV_ROW.search(patch):
             return patch
         if patch.strip() == "[]":
-            return PATCH_BLOCK
+            return block
         prefix = "" if not patch or patch.endswith("\n") else "\n"
-        return f"{patch}{prefix}{PATCH_BLOCK}"
+        return f"{patch}{prefix}{block}"
     next_patch = MANAGED_BLOCK.sub("", patch)
     if not next_patch.strip() or all(
         not line.strip() or line.lstrip().startswith("#") for line in next_patch.splitlines()
@@ -117,7 +156,14 @@ def _result(action: str, changed: bool, manifest: dict[str, Any], profile: Path)
     }, ensure_ascii=False))
 
 
-def install(profile: Path, asset_root: Path, dry_run: bool) -> None:
+def install(
+    profile: Path,
+    asset_root: Path,
+    dry_run: bool,
+    gateway_url: str | None = None,
+    api_key_ref: str | None = None,
+) -> None:
+    _validate_options(gateway_url, api_key_ref)
     package_path, package, patch = _read_profile(profile)
     manifest = _load_manifest(asset_root)
     dependencies = _asset_dependencies(asset_root, manifest)
@@ -135,7 +181,7 @@ def install(profile: Path, asset_root: Path, dry_run: bool) -> None:
         changed = changed or overrides.get(WEB_FRONTEND) != dependencies[WEB_FRONTEND]
         if not dry_run:
             overrides[WEB_FRONTEND] = dependencies[WEB_FRONTEND]
-    next_patch = _patched_text(patch, installing=True)
+    next_patch = _patched_text(patch, installing=True, gateway_url=gateway_url, api_key_ref=api_key_ref)
     changed = changed or next_patch != patch
     if not dry_run:
         for name, value in dependencies.items():
@@ -202,10 +248,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--profile", required=True, type=Path)
     parser.add_argument("--asset-root", required=True, type=Path)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--gateway-url")
+    parser.add_argument("--api-key-ref")
     args = parser.parse_args(argv)
     try:
         if args.action == "install":
-            install(args.profile, args.asset_root, args.dry_run)
+            install(
+                args.profile,
+                args.asset_root,
+                args.dry_run,
+                gateway_url=args.gateway_url,
+                api_key_ref=args.api_key_ref,
+            )
         elif args.action == "uninstall":
             uninstall(args.profile, args.asset_root, args.dry_run)
         else:
