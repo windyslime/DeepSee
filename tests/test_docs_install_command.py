@@ -6,11 +6,17 @@ ROOT = Path(__file__).parents[1]
 
 def test_readme_has_one_canonical_dsh_installer_command():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    heading = "## DSH 新手一键配置"
     command = "curl -fsSL https://raw.githubusercontent.com/windyslime/DeepSee/main/scripts/install-dsh-dsv.sh | bash"
     assert command in readme
-    assert "api_key =" not in readme[readme.index("## DSH 专用一键安装"):]
     assert "/Users/" not in readme
-    section = readme[readme.index("## DSH 专用一键安装"):]
+    start = readme.index(heading)
+    end = readme.index("## 安装", start)
+    section = readme[start:end]
+    assert start < readme.index("## 安装")
+    assert "public key" in section
+    assert "Y/n/c" in section
+    assert "api_key =" not in section
     assert "--configure" in section
     assert "--no-configure" in section
     assert "--verify" in section

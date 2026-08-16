@@ -3,6 +3,63 @@
 为 DeepSeek 官方 API 提供可插拔的视觉处理层,让 DeepSeek 获得多模态能力:
 一次 `ask_with_image()` 调用,完成"视觉模型看图 → DeepSeek 推理回答"。
 
+## DSH 新手一键配置
+
+已经安装 DSH Web 的用户，按下面四步即可让 DSH 使用 DeepSee 看图；不需要先理解
+网关、插件或凭证文件。
+
+### 1. 启动 DeepSee
+
+```bash
+pip install "seedeep[server]"
+deepsee-server
+```
+
+首次启动会显示一条 **public key** 和一条 admin key。只复制 public key；不要复制或
+填写 admin key。
+
+### 2. 运行一键配置
+
+在另一个终端运行:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/windyslime/DeepSee/main/scripts/install-dsh-dsv.sh | bash
+```
+
+看到 `Configure DeepSee connection automatically? [Y/n/c]` 时:
+
+- 直接按回车或输入 `Y`：选择自动配置；需要时粘贴刚才复制的 public key。
+- 输入 `n`：只安装，暂时不配置连接。
+- 输入 `c`：取消，不改动 DSH。
+
+### 3. 重启 DSH 并发一张图片
+
+在运行 DSH Web 的终端按 `Ctrl+C` 停止它，再用原来的启动命令重新启动并刷新浏览器。
+然后在聊天中上传一张图片并提问。看到可折叠的“识图”行即表示连接生效。
+
+### 4. 检查连接
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/windyslime/DeepSee/main/scripts/install-dsh-dsv.sh \
+  | bash -s -- --verify
+```
+
+看到 `DeepSee gateway reachable` 即表示 DSH 能找到 DeepSee。若提示网关不可达，确认第
+1 步的 `deepsee-server` 仍在运行后重试。
+
+没有交互终端时，先设置 public key，再使用自动配置；只想安装时使用仅安装模式:
+
+```bash
+export DEEPSEE_DSV_API_KEY='<DSV public key>'
+curl -fsSL https://raw.githubusercontent.com/windyslime/DeepSee/main/scripts/install-dsh-dsv.sh \
+  | bash -s -- --configure
+curl -fsSL https://raw.githubusercontent.com/windyslime/DeepSee/main/scripts/install-dsh-dsv.sh \
+  | bash -s -- --no-configure
+```
+
+完整排错见 [`docs/DSH-DSV-INSTALL.zh.md`](docs/DSH-DSV-INSTALL.zh.md)。安装器的技术约束、
+凭证处理和发布检查见 [`CONTRIBUTING.md`](CONTRIBUTING.md)。
+
 ## 安装
 
 ```bash
@@ -114,40 +171,6 @@ curl http://127.0.0.1:8712/v1/models \
 ```bash
 deepsee-server --no-auth --host 127.0.0.1
 ```
-
-## DSH 专用一键安装
-
-本仓库提供一个只适配 DeepSeek Harness (DSH) Web profile 的安装器。先启动网关:
-
-```bash
-pip install "seedeep[server]"
-deepsee-server
-```
-
-然后执行安装命令，并按终端提示选择自动配置、仅安装或取消:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/windyslime/DeepSee/main/scripts/install-dsh-dsv.sh | bash
-```
-
-自动化场景可显式选择:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/windyslime/DeepSee/main/scripts/install-dsh-dsv.sh \
-  | bash -s -- --configure
-curl -fsSL https://raw.githubusercontent.com/windyslime/DeepSee/main/scripts/install-dsh-dsv.sh \
-  | bash -s -- --no-configure
-```
-
-安装后重启 DSH Web profile，并验证连接:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/windyslime/DeepSee/main/scripts/install-dsh-dsv.sh \
-  | bash -s -- --verify
-```
-
-完整操作指南见 [`docs/DSH-DSV-INSTALL.zh.md`](docs/DSH-DSV-INSTALL.zh.md)，维护约束、
-凭证处理和发布检查见 [`CONTRIBUTING.md`](CONTRIBUTING.md)。
 
 默认每个身份每 60 秒最多 60 个推理请求,全局最多 8 个并发推理请求,并发队列
 最多等待 2 秒。可用 `DeepSee_RATE_LIMIT_REQUESTS`、
