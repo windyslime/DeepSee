@@ -13,7 +13,18 @@ def test_readme_has_one_canonical_dsh_installer_command():
     section = readme[readme.index("## DSH 专用一键安装"):]
     assert "--configure" in section
     assert "--no-configure" in section
-    assert ".credentials.yaml" in section
+    assert "--verify" in section
+    assert ".credentials.yaml" not in section
+    assert "/dev/tty" not in section
+
+
+def test_contributing_contains_dsh_installer_technical_contract():
+    text = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    assert "dsh-credentials.py" in text
+    assert ".credentials.yaml" in text
+    assert "/dev/tty" in text
+    assert "0600" in text
+    assert "test_dsh_installer_script.py" in text
 
 
 def test_guides_are_dsh_only_and_do_not_embed_credentials():
