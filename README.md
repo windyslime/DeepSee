@@ -115,6 +115,44 @@ curl http://127.0.0.1:8712/v1/models \
 deepsee-server --no-auth --host 127.0.0.1
 ```
 
+## DSH 专用一键安装
+
+本仓库提供一个只适配 DeepSeek Harness (DSH) Web profile 的安装器。它会安装固定
+版本的 DSV 插件和匹配的 Web UI,备份 `~/.dsh/profiles/web`,合并 `llm-dsv` 路由,
+运行 profile 依赖安装,并检查本地网关是否可达。安装器不会接触视觉提供方 API key,
+也不会修改其他客户端。
+
+先在运行网关的终端完成配置并启动:
+
+```bash
+pip install "seedeep[server]"
+deepsee-server
+```
+
+首次启动输出的 DSV public key 只用于 DSH 入站鉴权。将它放进 DSH 启动环境(不要写
+入 Git 或截图):
+
+```bash
+export DEEPSEE_DSV_API_KEY='<DSV public key>'
+```
+
+然后在另一终端执行一键安装:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/windyslime/DeepSee/main/scripts/install-dsh-dsv.sh | bash
+```
+
+安装完成后重启 DSH Web profile。验证安装与网关连接:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/windyslime/DeepSee/main/scripts/install-dsh-dsv.sh \
+  | bash -s -- --verify
+```
+
+如果当前网关尚未运行,安装器仍会完成 DSH 安装,并明确提示 `deepsee-server` 启动命令。
+完整的配置、重启、回滚和排错步骤见
+[`docs/DSH-DSV-INSTALL.zh.md`](docs/DSH-DSV-INSTALL.zh.md)。
+
 默认每个身份每 60 秒最多 60 个推理请求,全局最多 8 个并发推理请求,并发队列
 最多等待 2 秒。可用 `DeepSee_RATE_LIMIT_REQUESTS`、
 `DeepSee_RATE_LIMIT_WINDOW`、`DeepSee_MAX_CONCURRENT_REQUESTS` 和
