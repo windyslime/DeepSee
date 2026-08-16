@@ -10,6 +10,10 @@ def test_readme_has_one_canonical_dsh_installer_command():
     assert command in readme
     assert "api_key =" not in readme[readme.index("## DSH 专用一键安装"):]
     assert "/Users/" not in readme
+    section = readme[readme.index("## DSH 专用一键安装"):]
+    assert "--configure" in section
+    assert "--no-configure" in section
+    assert ".credentials.yaml" in section
 
 
 def test_guides_are_dsh_only_and_do_not_embed_credentials():
@@ -19,3 +23,6 @@ def test_guides_are_dsh_only_and_do_not_embed_credentials():
         assert "<DSV public key>" in text
         assert "DEEPSEEK_API_KEY" not in text or "留在" in text
         assert "/Users/" not in text
+        assert "--configure" in text
+        assert "--no-configure" in text
+        assert ".credentials.yaml" in text

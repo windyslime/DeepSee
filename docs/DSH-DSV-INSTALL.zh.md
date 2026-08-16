@@ -28,6 +28,25 @@ export DEEPSEE_DSV_API_KEY='<DSV public key>'
 curl -fsSL https://raw.githubusercontent.com/windyslime/DeepSee/main/scripts/install-dsh-dsv.sh | bash
 ```
 
+安装器会询问 `Configure DeepSee connection automatically? [Y/n/c]`。选择 `Y` 会把
+网关地址和 `DEEPSEE_DSV_API_KEY` 写入 DSH；选择 `n` 只安装 DSV 包并保留现有配置；选择
+`c` 会在任何 profile 文件改变前退出。交互输入从 `/dev/tty` 读取，因此上面的
+`curl | bash` 仍可正常显示选择。
+
+无交互环境必须显式选择模式:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/windyslime/DeepSee/main/scripts/install-dsh-dsv.sh \
+  | bash -s -- --configure
+curl -fsSL https://raw.githubusercontent.com/windyslime/DeepSee/main/scripts/install-dsh-dsv.sh \
+  | bash -s -- --no-configure
+```
+
+`--configure` 优先读取环境变量 `DEEPSEE_DSV_API_KEY`，否则从隐藏输入读取 public key；
+显式模式允许轮换已有 key。普通交互式 `Y` 会保留已经存在的 key。DSH 只保存
+`~/.dsh/.credentials.yaml` 中的 DSV public key，文件权限为 `0600`；视觉 provider 的
+key 仍只留在 DeepSee 网关。安装器不会把 key 放进命令行参数、日志或仓库。
+
 安装器固定使用 `dsh-dsv-v0.1.0` Release。它会下载资产包并校验 SHA-256,将文件
 缓存到 `~/.dsh/cache/deepsee-dsv/0.1.0`,然后备份并更新 Web profile 的
 `package.json`、`cordis.patch.yml` 和 lockfile。重复执行是幂等的。
@@ -55,7 +74,8 @@ curl -fsS http://127.0.0.1:8712/health
 ```
 
 `--verify` 会检查 DSV 包、`llm-dsv` Loader 行和网关健康端点。若网关未启动,它会
-报告“已安装、待启动”,并提示执行 `deepsee-server`。
+以只读方式报告“已安装、待启动”,并提示执行 `deepsee-server`；它不会创建 profile
+备份或修改凭证。
 
 在 DSH 中发送一条含图片的消息。正常结果包含助手正文和一个可折叠的“识图”行；
 识图行展示后端、模型、模式、耗时、缓存和追踪元数据。无图消息和标题/压缩等辅助
@@ -63,8 +83,9 @@ curl -fsS http://127.0.0.1:8712/health
 
 ## 4. 回滚或卸载
 
-安装器会在 `~/.dsh/profiles/web/.deepsee-dsv-backups/` 保存时间戳备份。卸载只移除
-它自己写入的依赖和 patch 行,保留其他用户配置:
+安装器会在 `~/.dsh/profiles/web/.deepsee-dsv-backups/` 保存时间戳备份。自动配置时
+凭证文件也会一并备份；卸载只移除它自己写入的依赖和 patch 行,保留其他用户配置和
+`~/.dsh/.credentials.yaml`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/windyslime/DeepSee/main/scripts/uninstall-dsh-dsv.sh | bash

@@ -119,8 +119,8 @@ deepsee-server --no-auth --host 127.0.0.1
 
 本仓库提供一个只适配 DeepSeek Harness (DSH) Web profile 的安装器。它会安装固定
 版本的 DSV 插件和匹配的 Web UI,备份 `~/.dsh/profiles/web`,合并 `llm-dsv` 路由,
-运行 profile 依赖安装,并检查本地网关是否可达。安装器不会接触视觉提供方 API key,
-也不会修改其他客户端。
+运行 profile 依赖安装,并检查本地网关是否可达。安装器只会处理 DSV public key,
+不会接触视觉提供方 API key,也不会修改其他客户端。
 
 先在运行网关的终端完成配置并启动:
 
@@ -129,8 +129,8 @@ pip install "seedeep[server]"
 deepsee-server
 ```
 
-首次启动输出的 DSV public key 只用于 DSH 入站鉴权。将它放进 DSH 启动环境(不要写
-入 Git 或截图):
+首次启动输出的 DSV public key 只用于 DSH 入站鉴权。可以把它放进环境变量，让安装器
+自动写入 DSH 的凭证文件(不要写入 Git 或截图):
 
 ```bash
 export DEEPSEE_DSV_API_KEY='<DSV public key>'
@@ -141,6 +141,25 @@ export DEEPSEE_DSV_API_KEY='<DSV public key>'
 ```bash
 curl -fsSL https://raw.githubusercontent.com/windyslime/DeepSee/main/scripts/install-dsh-dsv.sh | bash
 ```
+
+命令会在终端询问是否自动配置。选择 `Y` 会写入
+`~/.dsh/.credentials.yaml` 并把网关地址写入托管的 `llm-dsv` patch；选择 `n` 只安装
+插件、保留现有凭证和 patch；选择 `c` 取消且不创建备份。脚本通过 `/dev/tty` 读取选择，
+所以从管道执行也能正常交互。
+
+无交互环境请显式选择模式:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/windyslime/DeepSee/main/scripts/install-dsh-dsv.sh \
+  | bash -s -- --configure
+curl -fsSL https://raw.githubusercontent.com/windyslime/DeepSee/main/scripts/install-dsh-dsv.sh \
+  | bash -s -- --no-configure
+```
+
+`--configure` 优先读取 `DEEPSEE_DSV_API_KEY`；没有环境变量时会隐藏输入。显式
+`--configure` 允许轮换已有 DSV key，普通交互式自动配置会保留已有 key。key 只通过
+标准输入交给 helper，不会出现在命令行、输出或仓库文件中；凭证文件权限保持为
+`0600`。`--verify` 是只读检查，`--uninstall` 不删除凭证。
 
 安装完成后重启 DSH Web profile。验证安装与网关连接:
 
