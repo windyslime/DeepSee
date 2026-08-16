@@ -101,6 +101,15 @@ def test_verify_and_uninstall_remove_only_managed_layer(tmp_path: Path):
     assert "id: llm-dsv" not in patch
 
 
+def test_uninstall_turns_comment_only_patch_into_empty_list(tmp_path: Path):
+    profile = _profile(tmp_path)
+    (profile / "cordis.patch.yml").write_text("# only a comment\n", encoding="utf-8")
+    asset_root = _asset_root(tmp_path)
+    assert _run("install", profile, asset_root).returncode == 0
+    assert _run("uninstall", profile, asset_root).returncode == 0
+    assert (profile / "cordis.patch.yml").read_text(encoding="utf-8") == "[]\n"
+
+
 def test_missing_profile_fails_without_creating_files(tmp_path: Path):
     asset_root = _asset_root(tmp_path)
     profile = tmp_path / "missing"

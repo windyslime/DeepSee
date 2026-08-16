@@ -13,6 +13,7 @@ from typing import Any
 
 START_MARKER = "# >>> deepsee-dsv managed layer >>>"
 END_MARKER = "# <<< deepsee-dsv managed layer <<<"
+WEB_FRONTEND = "@deepseek-ai/dsh-web-frontend"
 PATCH_BLOCK = (
     f"{START_MARKER}\n"
     "- insert:\n"
@@ -84,7 +85,12 @@ def _patched_text(patch: str, installing: bool) -> str:
             return PATCH_BLOCK
         prefix = "" if not patch or patch.endswith("\n") else "\n"
         return f"{patch}{prefix}{PATCH_BLOCK}"
-    return MANAGED_BLOCK.sub("", patch)
+    next_patch = MANAGED_BLOCK.sub("", patch)
+    if not next_patch.strip() or all(
+        not line.strip() or line.lstrip().startswith("#") for line in next_patch.splitlines()
+    ):
+        return "[]\n"
+    return next_patch
 
 
 def _write_json(path: Path, value: dict[str, Any]) -> None:
@@ -119,6 +125,16 @@ def install(profile: Path, asset_root: Path, dry_run: bool) -> None:
     if not isinstance(current_dependencies, dict):
         raise ProfileError("profile dependencies must be an object")
     changed = any(current_dependencies.get(name) != value for name, value in dependencies.items())
+    if WEB_FRONTEND in dependencies:
+        package_manager = package.setdefault("pnpm", {})
+        if not isinstance(package_manager, dict):
+            raise ProfileError("profile pnpm configuration must be an object")
+        overrides = package_manager.setdefault("overrides", {})
+        if not isinstance(overrides, dict):
+            raise ProfileError("profile pnpm overrides must be an object")
+        changed = changed or overrides.get(WEB_FRONTEND) != dependencies[WEB_FRONTEND]
+        if not dry_run:
+            overrides[WEB_FRONTEND] = dependencies[WEB_FRONTEND]
     next_patch = _patched_text(patch, installing=True)
     changed = changed or next_patch != patch
     if not dry_run:
@@ -136,12 +152,22 @@ def uninstall(profile: Path, asset_root: Path, dry_run: bool) -> None:
     current_dependencies = package.get("dependencies", {})
     if not isinstance(current_dependencies, dict):
         raise ProfileError("profile dependencies must be an object")
+    package_manager = package.get("pnpm", {})
+    if not isinstance(package_manager, dict):
+        raise ProfileError("profile pnpm configuration must be an object")
+    overrides = package_manager.get("overrides", {})
+    if not isinstance(overrides, dict):
+        raise ProfileError("profile pnpm overrides must be an object")
     changed = False
     for name, expected in dependencies.items():
         if current_dependencies.get(name) == expected:
             changed = True
             if not dry_run:
                 del current_dependencies[name]
+    if WEB_FRONTEND in dependencies and overrides.get(WEB_FRONTEND) == dependencies[WEB_FRONTEND]:
+        changed = True
+        if not dry_run:
+            del overrides[WEB_FRONTEND]
     next_patch = _patched_text(patch, installing=False)
     changed = changed or next_patch != patch
     if not dry_run:
