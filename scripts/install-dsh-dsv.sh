@@ -292,7 +292,7 @@ if [[ "$configure_mode" == configure && "$credential_update" == 1 ]]; then
   unset credential_value
 fi
 
-if ! run_profile_action install; then
+if ! run_profile_action "$action"; then
   printf 'profile update failed; restoring backup: %s\n' "$backup" >&2
   restore_backup
   exit 1

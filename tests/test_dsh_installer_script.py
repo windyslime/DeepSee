@@ -187,3 +187,20 @@ def test_verify_is_read_only_after_install(tmp_path: Path):
     assert after == before
     assert sorted((profile / ".deepsee-dsv-backups").iterdir()) == backups_before
     assert dsh_home.exists()
+
+
+def test_uninstall_removes_managed_layer_and_keeps_credentials(tmp_path: Path):
+    configured = _run(tmp_path, "--configure", DEEPSEE_DSV_API_KEY="keep-secret")
+    assert configured.returncode == 0, configured.stderr
+    dsh_home = tmp_path / "dsh"
+    profile = dsh_home / "profiles" / "web"
+    credentials = dsh_home / ".credentials.yaml"
+    before = credentials.read_bytes()
+
+    result = _run(tmp_path, "--uninstall")
+
+    assert result.returncode == 0, result.stderr
+    assert credentials.read_bytes() == before
+    package = json.loads((profile / "package.json").read_text(encoding="utf-8"))
+    assert "@deepseek-ai/dsh-llm-dsv" not in package["dependencies"]
+    assert "llm-dsv" not in (profile / "cordis.patch.yml").read_text(encoding="utf-8")
