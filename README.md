@@ -1,6 +1,6 @@
 # DeepSee
 
-**DeepSeeLite (DSL)** 是面向 DSH 的轻量独立版：保留视觉编排、兼容协议与网关能力，聚焦轻量部署与维护；完整 DeepSee 仍包含更广泛的服务、集成和扩展能力。
+**DeepSeeLite (DSL)`https://github.com/windyslime/DeepSeeLite`** 是面向 DSH 的轻量独立版：保留视觉编排、兼容协议与网关能力，聚焦轻量部署与维护；完整 DeepSee 仍包含更广泛的服务、集成和扩展能力。
 
 为 DeepSeek 官方 API 提供可插拔的视觉处理层,让 DeepSeek 获得多模态能力:
 一次 `ask_with_image()` 调用,完成"视觉模型看图 → DeepSeek 推理回答"。
