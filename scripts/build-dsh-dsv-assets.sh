@@ -153,6 +153,8 @@ with tarfile.open(archive_path, "w:gz") as archive:
     archive.add(root / "manifest.json", arcname="manifest.json")
     for entry in entries:
         archive.add(root / entry["path"], arcname=entry["path"])
+    for entry in helpers:
+        archive.add(root / entry["path"], arcname=entry["path"])
 (pathlib.Path(output_dir) / "manifest.json").write_bytes(manifest_bytes)
 archive_sha = hashlib.sha256(archive_path.read_bytes()).hexdigest()
 (pathlib.Path(output_dir) / f"{archive_path.name}.sha256").write_text(f"{archive_sha}  {archive_path.name}\n", encoding="utf-8")
