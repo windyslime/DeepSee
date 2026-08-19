@@ -90,7 +90,7 @@ for entry in manifest["packages"]:
 PY
 )
 
-python3 - "$work_dir/source-manifest.json" "$work_dir" "$output_dir" "$requested_commit" "$repo_root/scripts/verify-dsh-dsv-assets.py" <<'PY'
+python3 - "$work_dir/source-manifest.json" "$work_dir" "$output_dir" "$requested_commit" "$repo_root" <<'PY'
 import hashlib
 import json
 import os
@@ -100,7 +100,7 @@ import subprocess
 import sys
 import tarfile
 
-source_path, work_dir, output_dir, commit, verifier = sys.argv[1:]
+source_path, work_dir, output_dir, commit, repo_root = sys.argv[1:]
 with open(source_path, encoding="utf-8") as handle:
     manifest = json.load(handle)
 manifest["harnessCommit"] = commit
@@ -125,11 +125,27 @@ for entry in manifest["packages"]:
         "sha256": hashlib.sha256(data).hexdigest(),
     })
 manifest["packages"] = entries
+helpers = []
+helper_dir = pathlib.Path(work_dir) / "helpers"
+helper_dir.mkdir()
+for helper_name in ("dsh-profile.py", "verify-dsh-dsv-assets.py", "dsh-credentials.py"):
+    source = pathlib.Path(repo_root) / "scripts" / helper_name
+    if not source.is_file():
+        raise SystemExit(f"installer helper is missing: {source}")
+    target = helper_dir / helper_name
+    shutil.copy2(source, target)
+    helpers.append({
+        "name": helper_name,
+        "path": f"helpers/{helper_name}",
+        "sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
+    })
+manifest["helpers"] = helpers
 manifest_bytes = (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode()
 root = pathlib.Path(work_dir) / "archive-root"
 root.mkdir()
 (root / "manifest.json").write_bytes(manifest_bytes)
 (root / "packages").mkdir()
+shutil.copytree(helper_dir, root / "helpers")
 for entry in entries:
     shutil.copy2(package_dir / pathlib.Path(entry["path"]).name, root / entry["path"])
 archive_path = pathlib.Path(output_dir) / manifest["assetName"]

@@ -13,7 +13,7 @@ import asyncio
 import json
 import time
 from collections.abc import AsyncIterator, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Union
 
 import httpx
@@ -66,12 +66,17 @@ def describe_image(
     prompt: str,
     *,
     config: Config | None = None,
+    max_tokens: int | None = None,
+    mode: str | None = None,
 ) -> str:
     """Run the vision backend directly: image + prompt → raw text."""
     cfg = config if config is not None else load_config()
-    backend = create_backend(cfg.vision, cfg.retries)
+    vision_config = (
+        _vision_config_for_mode(cfg, mode) if mode is not None else cfg.vision
+    )
+    backend = create_backend(vision_config, cfg.retries)
     try:
-        return backend.describe(image, prompt)
+        return backend.describe(image, prompt, max_tokens=max_tokens)
     finally:
         backend.close()
 
@@ -81,12 +86,17 @@ async def describe_image_async(
     prompt: str,
     *,
     config: Config | None = None,
+    max_tokens: int | None = None,
+    mode: str | None = None,
 ) -> str:
     """Async equivalent of ``describe_image``."""
     cfg = config if config is not None else load_config()
-    backend = create_backend(cfg.vision, cfg.retries)
+    vision_config = (
+        _vision_config_for_mode(cfg, mode) if mode is not None else cfg.vision
+    )
+    backend = create_backend(vision_config, cfg.retries)
     try:
-        return await backend.describe_async(image, prompt)
+        return await backend.describe_async(image, prompt, max_tokens=max_tokens)
     finally:
         await backend.aclose()
 
@@ -162,6 +172,7 @@ def ask_with_image(
     stream: bool = False,
     config: Config | None = None,
     mode: str = "auto",
+    max_tokens: int | None = None,
 ) -> Union[str, Iterator[str]]:
     """Full composition: vision analysis → DeepSeek reasoning.
 
@@ -186,6 +197,8 @@ def ask_with_image(
         "messages": messages,
         "stream": stream,
     }
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
     return _run_deepseek(cfg, payload)
 
 
@@ -194,6 +207,7 @@ def ask(
     *,
     stream: bool = False,
     config: Config | None = None,
+    max_tokens: int | None = None,
 ) -> Union[str, Iterator[str]]:
     """Plain-text DeepSeek conversation (OpenAI-compatible).
 
@@ -209,6 +223,8 @@ def ask(
         "messages": messages,
         "stream": stream,
     }
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
     return _run_deepseek(cfg, payload)
 
 
@@ -217,6 +233,7 @@ async def ask_async(
     *,
     stream: bool = False,
     config: Config | None = None,
+    max_tokens: int | None = None,
 ) -> Union[str, AsyncIterator[str]]:
     """Async plain-text DeepSeek conversation.
 
@@ -232,6 +249,8 @@ async def ask_async(
         "messages": messages,
         "stream": stream,
     }
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
     return await _run_deepseek_async(cfg, payload)
 
 
@@ -243,6 +262,7 @@ async def ask_with_image_async(
     config: Config | None = None,
     mode: str = "auto",
     include_vision: bool = False,
+    max_tokens: int | None = None,
 ) -> Union[str, AsyncIterator[str], VisionResult]:
     """Async full composition: vision analysis → DeepSeek reasoning.
 
@@ -263,6 +283,8 @@ async def ask_with_image_async(
         "messages": messages,
         "stream": stream,
     }
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
     answer = await _run_deepseek_async(cfg, payload)
     if not include_vision:
         return answer
@@ -318,7 +340,7 @@ def _analyze_image(
     """
     if mode not in ("auto", "ui", "general"):
         raise ValueError(f"非法 mode: {mode!r};可选值: auto, ui, general")
-    backend = create_backend(cfg.vision, cfg.retries)
+    backend = create_backend(_vision_config_for_mode(cfg, mode), cfg.retries)
     try:
         if mode == "general":
             raw = backend.describe(image, build_vision_prompt(question))
@@ -359,7 +381,7 @@ async def _analyze_image_async(
     """
     if mode not in ("auto", "ui", "general"):
         raise ValueError(f"非法 mode: {mode!r};可选值: auto, ui, general")
-    backend = create_backend(cfg.vision, cfg.retries)
+    backend = create_backend(_vision_config_for_mode(cfg, mode), cfg.retries)
     try:
         if mode == "general":
             raw = await backend.describe_async(image, build_vision_prompt(question))
@@ -386,6 +408,11 @@ async def _analyze_image_async(
         return {"kind": "description", "text": raw}
     finally:
         await backend.aclose()
+
+
+def _vision_config_for_mode(cfg: Config, mode: str):
+    """Select a mode-specific model without mutating shared configuration."""
+    return replace(cfg.vision, model=cfg.vision.model_for_mode(mode))
 
 
 def _format_context(vision_result: dict[str, Any]) -> str:
@@ -441,6 +468,7 @@ def _stream_answers(cfg: Config, payload: dict) -> Iterator[str]:
     """
     url = f"{cfg.deepseek.base_url.rstrip('/')}/chat/completions"
     client = httpx.Client(timeout=120.0, trust_env=False)
+    resp: httpx.Response | None = None
     deadline = time.monotonic() + _STREAM_TOTAL_TIMEOUT
     try:
         resp = stream_request(
@@ -469,7 +497,7 @@ def _stream_answers(cfg: Config, payload: dict) -> Iterator[str]:
                     "DeepSeek 流式响应解析失败",
                     model=cfg.deepseek.model,
                 ) from exc
-            content = chunk.get("choices", [{}])[0].get("delta", {}).get("content")
+            content = _stream_chunk_content(chunk, cfg.deepseek.model)
             if content:
                 yield content
     except httpx.HTTPStatusError as exc:
@@ -490,14 +518,16 @@ def _stream_answers(cfg: Config, payload: dict) -> Iterator[str]:
             model=cfg.deepseek.model,
         ) from exc
     finally:
+        if resp is not None:
+            resp.close()
         client.close()
 
 
 async def _bounded_async_iter(agen: AsyncIterator[str], timeout: float) -> AsyncIterator[str]:
     """Iterate ``agen`` under a total wall-clock deadline (Python 3.10-safe).
 
-    ``asyncio.timeout()`` needs 3.11+; instead every ``__anext__`` is awaited
-    via ``asyncio.wait_for`` with a shrinking remaining budget, which yields
+    ``asyncio.timeout()`` needs 3.11+; instead every ``__anext__`` runs in an
+    explicit task with a shrinking remaining budget, which yields
     the same "overall stream duration" semantics on 3.10: a peer that keeps
     sending SSE keepalive lines without ever emitting ``[DONE]`` still trips
     the deadline, and a silent peer trips the leftover budget instead of the
@@ -509,17 +539,54 @@ async def _bounded_async_iter(agen: AsyncIterator[str], timeout: float) -> Async
         remaining = deadline - loop.time()
         if remaining <= 0:
             raise asyncio.TimeoutError("stream total duration exceeded")
+        next_item = asyncio.ensure_future(agen.__anext__())
         try:
-            item = await asyncio.wait_for(agen.__anext__(), remaining)
+            done, _ = await asyncio.wait({next_item}, timeout=remaining)
+        except asyncio.CancelledError:
+            next_item.cancel()
+            await asyncio.gather(next_item, return_exceptions=True)
+            raise
+        if not done:
+            next_item.cancel()
+            await asyncio.gather(next_item, return_exceptions=True)
+            raise asyncio.TimeoutError("stream total duration exceeded")
+        try:
+            item = next_item.result()
         except StopAsyncIteration:
             return
         yield item
+
+
+def _stream_chunk_content(chunk: object, model: str) -> str | None:
+    """Validate the minimum OpenAI SSE chunk shape and extract text."""
+    try:
+        if not isinstance(chunk, dict):
+            raise TypeError
+        choices = chunk["choices"]
+        if not isinstance(choices, list) or not choices:
+            raise TypeError
+        choice = choices[0]
+        if not isinstance(choice, dict):
+            raise TypeError
+        delta = choice["delta"]
+        if not isinstance(delta, dict):
+            raise TypeError
+        content = delta.get("content")
+        if content is not None and not isinstance(content, str):
+            raise TypeError
+        return content
+    except (KeyError, TypeError, IndexError) as exc:
+        raise ComposeError(
+            "DeepSeek 流式响应解析失败",
+            model=model,
+        ) from exc
 
 
 async def _stream_answers_async(cfg: Config, payload: dict) -> AsyncIterator[str]:
     """Async SSE-stream the DeepSeek answer chunk by chunk."""
     url = f"{cfg.deepseek.base_url.rstrip('/')}/chat/completions"
     client = httpx.AsyncClient(timeout=120.0, trust_env=False)
+    resp: httpx.Response | None = None
     try:
         resp = await stream_request_async(
             client,
@@ -545,7 +612,7 @@ async def _stream_answers_async(cfg: Config, payload: dict) -> AsyncIterator[str
                         "DeepSeek 流式响应解析失败",
                         model=cfg.deepseek.model,
                     ) from exc
-                content = chunk.get("choices", [{}])[0].get("delta", {}).get("content")
+                content = _stream_chunk_content(chunk, cfg.deepseek.model)
                 if content:
                     yield content
         except asyncio.TimeoutError as exc:
@@ -565,4 +632,6 @@ async def _stream_answers_async(cfg: Config, payload: dict) -> AsyncIterator[str
             model=cfg.deepseek.model,
         ) from exc
     finally:
+        if resp is not None:
+            await resp.aclose()
         await client.aclose()

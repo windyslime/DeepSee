@@ -22,8 +22,15 @@ class OpenAICompatibleBackend(VisionBackend):
     def _build_url(self) -> str:
         return f"{self.base_url.rstrip('/')}/chat/completions"
 
-    def _build_payload(self, media_type: str, b64: str, prompt: str) -> dict:
-        return {
+    def _build_payload(
+        self,
+        media_type: str,
+        b64: str,
+        prompt: str,
+        *,
+        max_tokens: int | None = None,
+    ) -> dict:
+        payload = {
             "model": self.model,
             "messages": [
                 {
@@ -38,6 +45,9 @@ class OpenAICompatibleBackend(VisionBackend):
                 }
             ],
         }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+        return payload
 
     def _build_headers(self) -> dict:
         return {"Authorization": f"Bearer {self.api_key}"}
@@ -50,7 +60,12 @@ class OpenAICompatibleBackend(VisionBackend):
                 "POST",
                 self._build_url(),
                 retries=self.retries,
-                json=self._build_payload(media_type, b64, prompt),
+                json=self._build_payload(
+                    media_type,
+                    b64,
+                    prompt,
+                    max_tokens=opts.get("max_tokens"),
+                ),
                 headers=self._build_headers(),
             )
             data = resp.json()
@@ -83,7 +98,12 @@ class OpenAICompatibleBackend(VisionBackend):
                 "POST",
                 self._build_url(),
                 retries=self.retries,
-                json=self._build_payload(media_type, b64, prompt),
+                json=self._build_payload(
+                    media_type,
+                    b64,
+                    prompt,
+                    max_tokens=opts.get("max_tokens"),
+                ),
                 headers=self._build_headers(),
             )
             data = resp.json()

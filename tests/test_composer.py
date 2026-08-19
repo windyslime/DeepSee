@@ -555,6 +555,53 @@ def test_stream_answers_async_total_timeout(config, monkeypatch):
     assert len(got) < 20000  # 超时前只消费了部分,而不是一次性读完
 
 
+@pytest.mark.parametrize(
+    "chunk",
+    [
+        {"choices": []},
+        {"choices": [None]},
+        {"choices": [{"delta": None}]},
+        {"choices": [{"delta": {"content": 123}}]},
+    ],
+)
+def test_stream_answers_rejects_malformed_chunks(config, chunk):
+    body = f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n".encode()
+    with respx.mock:
+        respx.post("https://api.deepseek.com/chat/completions").mock(
+            return_value=httpx.Response(200, content=body)
+        )
+        with pytest.raises(ComposeError, match="响应解析失败"):
+            list(_stream_answers(config, _sse_payload(config.deepseek.model)))
+
+
+@pytest.mark.parametrize(
+    "chunk",
+    [
+        {"choices": []},
+        {"choices": [None]},
+        {"choices": [{"delta": None}]},
+        {"choices": [{"delta": {"content": 123}}]},
+    ],
+)
+def test_stream_answers_async_rejects_malformed_chunks(config, chunk):
+    body = f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n".encode()
+
+    async def _run():
+        async with respx.mock:
+            respx.post("https://api.deepseek.com/chat/completions").mock(
+                return_value=httpx.Response(200, content=body)
+            )
+            return [
+                item
+                async for item in _stream_answers_async(
+                    config, _sse_payload(config.deepseek.model)
+                )
+            ]
+
+    with pytest.raises(ComposeError, match="响应解析失败"):
+        asyncio.run(_run())
+
+
 class _LongSSE(httpx.AsyncByteStream):
     """足够长的 SSE 上游:测试在 ~0.05s 取消时远未结束,没有 [DONE]。
 

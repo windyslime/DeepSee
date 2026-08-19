@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextlib
 import json
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 
 from deepsee.errors import ComposeError, VisionBackendError
 
@@ -29,6 +29,9 @@ def parse_request(body: dict) -> tuple[str, bytes | str | None]:
     for msg in messages or []:
         if not isinstance(msg, dict):
             raise ValueError("messages 项必须是对象")
+        role = msg.get("role")
+        if role not in {"user", "assistant", "system"}:
+            raise ValueError("role 必须是 user、assistant 或 system")
         content = msg.get("content")
         if "content" in msg and not (
             isinstance(content, str) or isinstance(content, list)
@@ -36,9 +39,9 @@ def parse_request(body: dict) -> tuple[str, bytes | str | None]:
             # content 字段存在但既非字符串也非数组(含 null/数字/对象),
             # 对所有 role 生效,不因 role != user 而绕过
             raise ValueError("content 必须是字符串或数组")
-        if msg.get("role") != "user":
-            continue
         if isinstance(content, str):
+            if role != "user":
+                continue
             text = content
         elif isinstance(content, list):
             for block in content:
@@ -46,28 +49,37 @@ def parse_request(body: dict) -> tuple[str, bytes | str | None]:
                     raise ValueError("content 块必须是对象")
                 btype = block.get("type")
                 if btype == "text":
-                    value = block.get("text", "")
+                    value = block.get("text")
                     if not isinstance(value, str):
                         raise ValueError("text 必须是字符串")
-                    text = value
+                    if role == "user":
+                        text = value
                 elif btype == "image":
                     source = block.get("source")
                     if not isinstance(source, dict):
                         raise ValueError("image source 必须是对象")
-                    if source.get("type") == "base64":
+                    source_type = source.get("type")
+                    if source_type not in {"base64", "url"}:
+                        raise ValueError("image source.type 必须是 base64 或 url")
+                    if source_type == "base64":
+                        media_type = source.get("media_type")
+                        if media_type is not None and not isinstance(media_type, str):
+                            raise ValueError("media_type 必须是字符串")
                         if "data" in source:
                             data = source["data"]
                             if not isinstance(data, str):
                                 raise ValueError("data 必须是字符串")
-                            if data:
+                            if role == "user" and data:
                                 image = decode_base64_image(data)
-                    elif source.get("type") == "url":
+                    else:
                         if "url" in source:
                             url = source["url"]
                             if not isinstance(url, str):
                                 raise ValueError("url 必须是字符串")
-                            if url:
+                            if role == "user" and url:
                                 image = extract_image_from_url(url)
+                else:
+                    raise ValueError("不支持的 content 块类型")
     return text, image
 
 
@@ -96,6 +108,7 @@ async def encode_stream(
     chunks: AsyncIterator[str],
     vision: str | None,
     model: str,
+    on_error: Callable[[str], None] | None = None,
 ) -> AsyncIterator[bytes]:
     """SSE event stream: message_start → vision_analysis → text deltas → stop.
 
@@ -139,6 +152,9 @@ async def encode_stream(
                         }
                     )
             except (ComposeError, VisionBackendError) as exc:
+                if on_error is not None:
+                    # 流式响应无法改变 HTTP 状态码,必须让 trace 记录真实失败
+                    on_error("upstream_error")
                 yield _event(
                     {
                         "type": "error",

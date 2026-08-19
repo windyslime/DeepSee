@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from base64 import b64decode
+from binascii import Error as Base64Error
 
 from deepsee.pipeline.image import MAX_IMAGE_BYTES
 
@@ -20,7 +21,7 @@ def extract_image_from_url(url: str) -> bytes | str:
         m = re.match(r"data:[^;]+;base64,(.*)", url, re.DOTALL)
         if not m:
             raise ValueError("仅支持 base64 data URL 图片")
-        raw = b64decode(m.group(1))
+        raw = _decode_base64(m.group(1))
         if len(raw) > MAX_IMAGE_BYTES:
             raise ValueError(
                 f"图片数据过大(超过 {MAX_IMAGE_BYTES // (1024 * 1024)} MiB)"
@@ -33,11 +34,21 @@ def extract_image_from_url(url: str) -> bytes | str:
 
 def decode_base64_image(data: str) -> bytes:
     """Decode a bare base64 payload (Anthropic source / Gemini inline_data)."""
-    if not isinstance(data, str) or not data:
+    if not isinstance(data, str):
         raise ValueError("图片 base64 数据缺失")
-    raw = b64decode(data)
+    raw = _decode_base64(data)
     if len(raw) > MAX_IMAGE_BYTES:
         raise ValueError(
             f"图片数据过大(超过 {MAX_IMAGE_BYTES // (1024 * 1024)} MiB)"
         )
+    return raw
+
+
+def _decode_base64(data: str) -> bytes:
+    try:
+        raw = b64decode(data, validate=True)
+    except (Base64Error, ValueError) as exc:
+        raise ValueError("图片 base64 数据非法") from exc
+    if not raw:
+        raise ValueError("图片 base64 数据不能为空")
     return raw

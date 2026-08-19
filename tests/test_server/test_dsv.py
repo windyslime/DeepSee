@@ -106,7 +106,7 @@ def test_dsv_non_stream_returns_independent_vision_and_answer(use_cfg, monkeypat
     assert seen["chat_messages"] == seen["messages"]
 
 
-def test_dsv_forwards_requested_deepseek_model(use_cfg, monkeypatch):
+def test_dsv_uses_configured_deepseek_model_for_composite_route_alias(use_cfg, monkeypatch):
     seen = {}
 
     async def fake_transform(messages, **kwargs):
@@ -122,10 +122,10 @@ def test_dsv_forwards_requested_deepseek_model(use_cfg, monkeypatch):
     monkeypatch.setattr("deepsee_server.app.transform_messages_with_vision", fake_transform)
     monkeypatch.setattr("deepsee_server.app.chat_async", fake_chat)
 
-    response = client.post("/v1/dsv", json={**_request(), "model": "deepseek-reasoner"})
+    response = client.post("/v1/dsv", json={**_request(), "model": "Deepseek-v4-vision"})
 
     assert response.status_code == 200
-    assert seen["model"] == "deepseek-reasoner"
+    assert seen["model"] == use_cfg.deepseek.model
 
 
 def test_dsv_stream_emits_vision_before_answer(use_cfg, monkeypatch):

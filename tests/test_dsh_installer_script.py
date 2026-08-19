@@ -24,12 +24,7 @@ def _package(name: str) -> bytes:
     return output.getvalue()
 
 
-def _release_root(tmp_path: Path) -> tuple[Path, Path]:
-    scripts_root = tmp_path / "scripts"
-    scripts_root.mkdir(exist_ok=True)
-    for name in ("dsh-profile.py", "verify-dsh-dsv-assets.py", "dsh-credentials.py"):
-        (scripts_root / name).write_bytes((ROOT / "scripts" / name).read_bytes())
-
+def _release_root(tmp_path: Path) -> Path:
     package_names = ("@deepseek-ai/dsh-llm-dsv", "@deepseek-ai/dsh-session")
     package_bytes = {name: _package(name) for name in package_names}
     entries = []
@@ -41,7 +36,21 @@ def _release_root(tmp_path: Path) -> tuple[Path, Path]:
             "path": f"packages/{filename}",
             "sha256": hashlib.sha256(data).hexdigest(),
         })
-    manifest = {"schemaVersion": 1, "releaseVersion": "0.1.0", "packages": entries}
+    helper_names = ("dsh-profile.py", "verify-dsh-dsv-assets.py", "dsh-credentials.py")
+    helpers = [
+        {
+            "name": name,
+            "path": f"helpers/{name}",
+            "sha256": hashlib.sha256((ROOT / "scripts" / name).read_bytes()).hexdigest(),
+        }
+        for name in helper_names
+    ]
+    manifest = {
+        "schemaVersion": 1,
+        "releaseVersion": "0.1.0",
+        "packages": entries,
+        "helpers": helpers,
+    }
     archive_bytes = io.BytesIO()
     with tarfile.open(fileobj=archive_bytes, mode="w:gz") as archive:
         manifest_bytes = json.dumps(manifest).encode()
@@ -52,11 +61,16 @@ def _release_root(tmp_path: Path) -> tuple[Path, Path]:
             package_info = tarfile.TarInfo(entry["path"])
             package_info.size = len(package_bytes[name])
             archive.addfile(package_info, io.BytesIO(package_bytes[name]))
+        for helper in helpers:
+            helper_bytes = (ROOT / "scripts" / helper["name"]).read_bytes()
+            helper_info = tarfile.TarInfo(helper["path"])
+            helper_info.size = len(helper_bytes)
+            archive.addfile(helper_info, io.BytesIO(helper_bytes))
     release_root = tmp_path / "release" / "dsh-dsv-v0.1.0"
     release_root.mkdir(parents=True, exist_ok=True)
     asset = release_root / "deepsee-dsh-dsv-v0.1.0.tar.gz"
     asset.write_bytes(archive_bytes.getvalue())
-    return scripts_root, tmp_path / "release"
+    return tmp_path / "release"
 
 
 def _profile(tmp_path: Path) -> tuple[Path, Path]:
@@ -87,13 +101,12 @@ def _commands(tmp_path: Path) -> Path:
 
 
 def _run(tmp_path: Path, *args: str, **extra_env: str) -> subprocess.CompletedProcess[str]:
-    scripts_root, release_root = _release_root(tmp_path)
+    release_root = _release_root(tmp_path)
     dsh_home, _ = _profile(tmp_path)
     command_dir = _commands(tmp_path)
     env = os.environ.copy()
     env.update({
         "DSH_HOME": str(dsh_home),
-        "DEEPSEE_INSTALLER_BASE_URL": scripts_root.as_uri(),
         "DEEPSEE_RELEASE_BASE_URL": release_root.as_uri(),
         "DEEPSEE_GATEWAY_URL": "http://127.0.0.1:9",
         "PATH": f"{command_dir}{os.pathsep}{env['PATH']}",
@@ -108,7 +121,7 @@ def _run(tmp_path: Path, *args: str, **extra_env: str) -> subprocess.CompletedPr
     )
 
 
-def test_no_configure_preserves_credentials_and_does_not_download_helper(tmp_path: Path):
+def test_no_configure_preserves_credentials_and_uses_release_helpers(tmp_path: Path):
     dsh_home, _ = _profile(tmp_path)
     credentials = dsh_home / ".credentials.yaml"
     original = "DEEPSEEK_API_KEY: keep-me\n"
@@ -119,7 +132,8 @@ def test_no_configure_preserves_credentials_and_does_not_download_helper(tmp_pat
 
     assert result.returncode == 0, result.stderr
     assert credentials.read_text(encoding="utf-8") == original
-    assert not (dsh_home / "cache/deepsee-dsv/0.1.0/dsh-credentials.py").exists()
+    assert (dsh_home / "cache/deepsee-dsv/0.1.0/release/helpers/dsh-profile.py").exists()
+    assert (dsh_home / "cache/deepsee-dsv/0.1.0/release/helpers/verify-dsh-dsv-assets.py").exists()
     assert "apiKeyEnv" not in (dsh_home / "profiles/web/cordis.patch.yml").read_text()
 
 
@@ -167,6 +181,25 @@ def test_noninteractive_install_requires_an_explicit_choice(tmp_path: Path):
     assert result.returncode == 2
     assert "--configure" in result.stderr
     assert "--no-configure" in result.stderr
+
+
+def test_version_rejects_path_traversal(tmp_path: Path):
+    result = _run(tmp_path, "--no-configure", DEEPSEE_DSV_VERSION="../escape")
+
+    assert result.returncode == 2
+    assert "invalid DSV version" in result.stderr
+    assert not (tmp_path / "dsh" / "cache" / "escape").exists()
+
+
+def test_installer_pins_current_verifier_hash():
+    script = SCRIPT.read_text(encoding="utf-8")
+    marker = 'readonly VERIFY_HELPER_SHA256="'
+    start = script.index(marker) + len(marker)
+    expected = script[start : script.index('"', start)]
+
+    assert expected == hashlib.sha256(
+        (ROOT / "scripts" / "verify-dsh-dsv-assets.py").read_bytes()
+    ).hexdigest()
 
 
 def test_verify_is_read_only_after_install(tmp_path: Path):

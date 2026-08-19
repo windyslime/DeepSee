@@ -30,6 +30,11 @@ ALLOWED_PACKAGES = {
     "@deepseek-ai/dsh-web-app",
     "@deepseek-ai/dsh-web-frontend",
 }
+ALLOWED_HELPERS = {
+    "dsh-profile.py",
+    "verify-dsh-dsv-assets.py",
+    "dsh-credentials.py",
+}
 
 
 def _read_json(data: bytes, label: str) -> dict[str, Any]:
@@ -141,6 +146,48 @@ def verify_archive(archive_path: str, manifest_path: str | None = None) -> dict[
             expected_version = entry.get("version")
             if expected_version is not None and package.get("version") != expected_version:
                 raise AssetError(f"version mismatch for {name}")
+
+        helpers = manifest.get("helpers")
+        if helpers is None:
+            # Legacy development fixtures may omit helper metadata. Release
+            # assets produced by build-dsh-dsv-assets always include it.
+            helpers = []
+        if not isinstance(helpers, list):
+            raise AssetError("manifest helpers must be a list")
+        seen_helpers: set[str] = set()
+        for entry in helpers:
+            if not isinstance(entry, dict):
+                raise AssetError("each manifest helper must be an object")
+            name = entry.get("name")
+            path = entry.get("path")
+            digest = entry.get("sha256")
+            if not all(isinstance(value, str) and value for value in (name, path, digest)):
+                raise AssetError("helper entries require name, path, and sha256")
+            if name not in ALLOWED_HELPERS:
+                raise AssetError(f"unknown helper name: {name}")
+            if name in seen_helpers:
+                raise AssetError(f"duplicate helper name: {name}")
+            seen_helpers.add(name)
+            if path != f"helpers/{name}":
+                raise AssetError(f"invalid helper path for {name}: {path}")
+            _safe_member(path)
+            if path in declared:
+                raise AssetError(f"duplicate archive path: {path}")
+            declared.add(path)
+            try:
+                member = archive.getmember(path)
+            except KeyError as exc:
+                raise AssetError(f"manifest helper is missing: {path}") from exc
+            helper_stream = archive.extractfile(member)
+            if helper_stream is None:
+                raise AssetError(f"manifest helper cannot be read: {path}")
+            helper_bytes = helper_stream.read()
+            if hashlib.sha256(helper_bytes).hexdigest() != digest:
+                raise AssetError(f"checksum mismatch for {path}")
+
+        if helpers and seen_helpers != ALLOWED_HELPERS:
+            missing = sorted(ALLOWED_HELPERS - seen_helpers)
+            raise AssetError(f"manifest helpers are incomplete: missing={missing}")
 
         actual = {member.name for member in members}
         if actual != declared:

@@ -269,3 +269,18 @@ def test_parse_request_rejects_invalid_content_on_non_user_role():
                 ]
             }
         )
+
+
+@pytest.mark.parametrize(
+    "content, message",
+    [
+        ([{"type": "text", "text": 123}], "text 必须是字符串"),
+        ([{"type": "image", "source": {"type": "base64", "data": 0}}], "data 必须是字符串"),
+        ([{"type": "image", "source": {"type": "unknown"}}], "source.type"),
+    ],
+)
+def test_parse_request_validates_nested_blocks_on_non_user_roles(content, message):
+    with pytest.raises(ValueError, match=message):
+        anthropic_protocol.parse_request(
+            {"messages": [{"role": "assistant", "content": content}]}
+        )

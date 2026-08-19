@@ -57,7 +57,7 @@ def _cache_key(
         mode,
         config.vision.backend,
         config.vision.base_url or "",
-        config.vision.model,
+        config.vision.model_for_mode(mode),
     ):
         digest.update(b"\0")
         digest.update(value.encode("utf-8"))

@@ -26,5 +26,17 @@ server = ["fastapi>=0.110", "uvicorn>=0.29"]
 [tool.hatch.build.targets.wheel]
 packages = ["deepsee", "deepsee_server"]
 
+# sdist 只发布运行与安装所需内容:源码包、README、许可证与项目元数据。
+# 测试、内部审查记录(.ohmycodex)、docs 与生成工具一律不进入发布包。
+[tool.hatch.build.targets.sdist]
+include = [
+    "/README.md",
+    "/LICENSE",
+    "/pyproject.toml",
+    "/deepsee",
+    "/deepsee_server",
+]
+exclude = ["/.gitignore"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

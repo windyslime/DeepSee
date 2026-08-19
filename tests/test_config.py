@@ -73,6 +73,14 @@ def test_missing_env_reference_raises(tmp_path):
         load_config(path=toml, env={})
 
 
+@pytest.mark.parametrize("section", ["deepseek", "vision"])
+def test_config_section_must_be_table(tmp_path, section):
+    toml = tmp_path / "deepsee.toml"
+    toml.write_text(f'{section} = "not-a-table"\n')
+    with pytest.raises(ConfigError, match=rf"{section} 必须是 TOML 表"):
+        load_config(path=toml, env={})
+
+
 def test_missing_deepseek_key_raises():
     env = {"VISION_API_KEY": "sk-vision-1"}
     with pytest.raises(ConfigError, match="deepseek.api_key"):

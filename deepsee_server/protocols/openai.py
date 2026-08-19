@@ -7,7 +7,7 @@ import copy
 import json
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -33,6 +33,7 @@ _SUPPORTED_CHAT_FIELDS = {
     "frequency_penalty",
     "response_format",
     "seed",
+    "store",
     "user",
 }
 _SUPPORTED_ROLES = {"system", "user", "assistant", "tool"}
@@ -105,7 +106,7 @@ def parse_chat_request(body: dict[str, Any]) -> ParsedChatRequest:
     params = {
         key: copy.deepcopy(value)
         for key, value in body.items()
-        if key not in {"model", "messages", "stream"}
+        if key not in {"model", "messages", "store", "stream"}
     }
     return ParsedChatRequest(
         messages=copy.deepcopy(messages),
@@ -142,6 +143,7 @@ async def encode_upstream_stream(
     *,
     vision: str | None = None,
     include_vision: bool = False,
+    on_error: Callable[[str], None] | None = None,
 ) -> AsyncIterator[bytes]:
     """Encode raw upstream chunks as SSE without dropping fields."""
     saw_finish = False
@@ -214,6 +216,9 @@ async def encode_upstream_stream(
                 ).encode()
             emit_done = True
     except (ComposeError, VisionBackendError) as exc:
+        if on_error is not None:
+            # 流式响应无法改变 HTTP 状态码,必须让 trace 记录真实失败
+            on_error("upstream_error")
         yield (
             "data: "
             + json.dumps(
@@ -299,6 +304,7 @@ async def encode_stream(
     chunks: AsyncIterator[str],
     vision: str | None,
     model: str,
+    on_error: Callable[[str], None] | None = None,
 ) -> AsyncIterator[bytes]:
     """SSE stream: vision_analysis as a leading chunk, then content, then [DONE].
 
@@ -339,6 +345,9 @@ async def encode_stream(
                 }
                 yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode()
     except (ComposeError, VisionBackendError) as exc:
+        if on_error is not None:
+            # 流式响应无法改变 HTTP 状态码,必须让 trace 记录真实失败
+            on_error("upstream_error")
         yield (
             "data: "
             + json.dumps(

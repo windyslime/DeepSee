@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 
 from deepsee.errors import ComposeError, VisionBackendError
 
@@ -88,6 +88,7 @@ async def encode_stream(
     chunks: AsyncIterator[str],
     vision: str | None,
     model: str,
+    on_error: Callable[[str], None] | None = None,
 ) -> AsyncIterator[bytes]:
     """Chunk stream (newline-delimited JSON): vision as a leading part chunk.
 
@@ -120,6 +121,9 @@ async def encode_stream(
                 }
                 yield json.dumps(payload, ensure_ascii=False).encode() + b"\n"
     except (ComposeError, VisionBackendError) as exc:
+        if on_error is not None:
+            # 流式响应无法改变 HTTP 状态码,必须让 trace 记录真实失败
+            on_error("upstream_error")
         yield json.dumps(
             {"error": {"code": 502, "message": str(exc)}}, ensure_ascii=False
         ).encode() + b"\n"

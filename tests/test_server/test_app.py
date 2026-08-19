@@ -8,10 +8,22 @@ from PIL import Image
 
 import deepsee.pipeline.image as image_module
 from deepsee.config.loader import Config, DeepSeekConfig, VisionConfig
+from deepsee.composer.vision_context import VisionTransformResult
 
-from deepsee_server.app import app
+from deepsee_server.app import app, configure_request_guard
+from deepsee_server.auth import configure_api_key_store, disable_api_key_auth
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def explicit_legacy_no_auth_mode():
+    """Keep legacy endpoint tests explicit about their intentional no-auth mode."""
+    disable_api_key_auth()
+    configure_request_guard(None)
+    yield
+    configure_api_key_store(None)
+    configure_request_guard(None)
 
 
 @pytest.fixture
@@ -59,10 +71,19 @@ def test_models_endpoint(use_cfg):
 
 
 def test_chat_text(use_cfg, monkeypatch):
-    async def fake_ask(question, **kw):
-        return "你好!"
+    async def fake_chat(messages, **kw):
+        return {
+            "id": "test-id",
+            "object": "chat.completion",
+            "model": "deepseek-chat",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "你好!"},
+                "finish_reason": "stop",
+            }],
+        }
 
-    monkeypatch.setattr("deepsee_server.app.ask_async", fake_ask)
+    monkeypatch.setattr("deepsee_server.app.chat_async", fake_chat)
     resp = client.post(
         "/v1/chat/completions",
         json={"model": "anything", "messages": [{"role": "user", "content": "你好"}]},
@@ -74,18 +95,25 @@ def test_chat_text(use_cfg, monkeypatch):
 
 
 def test_chat_with_image(use_cfg, monkeypatch):
-    from deepsee.composer.deepseek import VisionResult
-
     seen = {}
 
-    async def fake_ask_with_image(image, question, **kw):
-        seen["image"] = image
-        seen["question"] = question
-        return VisionResult(vision="图里有一只猫", text="图里是一只猫")
+    async def fake_transform(messages, **kw):
+        seen["messages"] = messages
+        return VisionTransformResult(messages=messages, analyses=["图里有一只猫"])
 
-    monkeypatch.setattr(
-        "deepsee_server.app.ask_with_image_async", fake_ask_with_image
-    )
+    async def fake_chat(messages, **kw):
+        return {
+            "id": "test-id",
+            "object": "chat.completion",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "图里是一只猫"},
+                "finish_reason": "stop",
+            }],
+        }
+
+    monkeypatch.setattr("deepsee_server.app.transform_messages_with_vision", fake_transform)
+    monkeypatch.setattr("deepsee_server.app.chat_async", fake_chat)
     resp = client.post(
         "/v1/chat/completions",
         json={
@@ -99,24 +127,79 @@ def test_chat_with_image(use_cfg, monkeypatch):
                 }
             ]
         },
+        headers={"X-DeepSee-Include-Vision": "1"},
     )
     assert resp.status_code == 200
     body = resp.json()["choices"][0]["message"]
     assert body["content"] == "图里是一只猫"
     assert body["vision_analysis"] == "图里有一只猫"
-    assert isinstance(seen["image"], bytes)
-    assert seen["question"] == "图里有什么?"
+    assert seen["messages"][0]["content"][0]["text"] == "图里有什么?"
+
+
+@pytest.mark.parametrize("vision_mode", ["ui", "general"])
+def test_chat_with_image_passes_vision_mode(use_cfg, monkeypatch, vision_mode):
+    seen = {}
+
+    async def fake_transform(messages, **kw):
+        seen["mode"] = kw.get("mode")
+        return VisionTransformResult(messages=messages, analyses=["分析"])
+
+    async def fake_chat(messages, **kw):
+        return {
+            "id": "test-id",
+            "choices": [{
+                "message": {"role": "assistant", "content": "回答"},
+                "finish_reason": "stop",
+            }],
+        }
+
+    monkeypatch.setattr("deepsee_server.app.transform_messages_with_vision", fake_transform)
+    monkeypatch.setattr("deepsee_server.app.chat_async", fake_chat)
+    resp = client.post(
+        "/v1/chat/completions",
+        headers={"X-DeepSee-Vision-Mode": vision_mode},
+        json={
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "描述"},
+                    {"type": "image_url", "image_url": {"url": _png_data_url()}},
+                ],
+            }]
+        },
+    )
+    assert resp.status_code == 200
+    assert seen["mode"] == vision_mode
+
+
+def test_chat_rejects_invalid_vision_mode_before_loading_config(monkeypatch):
+    def config_must_not_load():
+        raise AssertionError("configuration should not be loaded for invalid mode")
+
+    monkeypatch.setattr("deepsee_server.app._current_config", config_must_not_load)
+    resp = client.post(
+        "/v1/chat/completions",
+        headers={"X-DeepSee-Vision-Mode": "invalid"},
+        json={"messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert resp.status_code == 400
 
 
 def test_chat_stream(use_cfg, monkeypatch):
-    async def fake_ask(question, **kw):
+    async def fake_chat(messages, **kw):
         async def gen():
-            yield "你"
-            yield "好"
+            yield {
+                "id": "test-id",
+                "choices": [{"delta": {"content": "你"}, "finish_reason": None}],
+            }
+            yield {
+                "id": "test-id",
+                "choices": [{"delta": {"content": "好"}, "finish_reason": "stop"}],
+            }
 
         return gen()
 
-    monkeypatch.setattr("deepsee_server.app.ask_async", fake_ask)
+    monkeypatch.setattr("deepsee_server.app.chat_async", fake_chat)
     resp = client.post(
         "/v1/chat/completions",
         json={"stream": True, "messages": [{"role": "user", "content": "hi"}]},
@@ -271,7 +354,7 @@ def test_chat_image_error_maps_to_400(use_cfg, monkeypatch):
     async def boom(*args, **kwargs):
         raise ImageError("图片下载失败: 目标被拒绝")
 
-    monkeypatch.setattr("deepsee_server.app.ask_with_image_async", boom)
+    monkeypatch.setattr("deepsee_server.app.transform_messages_with_vision", boom)
     resp = client.post(
         "/v1/chat/completions",
         json={
@@ -325,12 +408,12 @@ def test_analyze_json_root_not_object_400(use_cfg):
 def test_chat_upstream_error_maps_to_502(use_cfg, monkeypatch):
     from deepsee.errors import ComposeError
 
-    async def boom(question, **kw):
+    async def boom(messages, **kw):
         raise ComposeError(
             "DeepSeek API 请求失败: HTTP 502", model="deepseek-chat", status_code=502
         )
 
-    monkeypatch.setattr("deepsee_server.app.ask_async", boom)
+    monkeypatch.setattr("deepsee_server.app.chat_async", boom)
     resp = client.post(
         "/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]}
     )
@@ -343,9 +426,15 @@ def test_chat_upstream_error_maps_to_502(use_cfg, monkeypatch):
 def test_chat_stream_upstream_error_emits_error_chunk(use_cfg, monkeypatch):
     from deepsee.errors import ComposeError
 
-    async def boom(question, **kw):
+    async def boom(messages, **kw):
         async def gen():
-            yield "部分内容"
+            yield {
+                "id": "test-id",
+                "choices": [{
+                    "delta": {"content": "部分内容"},
+                    "finish_reason": None,
+                }],
+            }
             raise ComposeError(
                 "DeepSeek API 请求失败: HTTP 502",
                 model="deepseek-chat",
@@ -354,7 +443,7 @@ def test_chat_stream_upstream_error_emits_error_chunk(use_cfg, monkeypatch):
 
         return gen()
 
-    monkeypatch.setattr("deepsee_server.app.ask_async", boom)
+    monkeypatch.setattr("deepsee_server.app.chat_async", boom)
     resp = client.post(
         "/v1/chat/completions",
         json={"stream": True, "messages": [{"role": "user", "content": "hi"}]},
@@ -389,10 +478,16 @@ def test_chat_stream_acloses_iterator(use_cfg, monkeypatch):
 
     closed = []
 
-    async def fake_ask(question, **kw):
+    async def fake_chat(messages, **kw):
         async def inner():
-            yield "你"
-            yield "好"
+            yield {
+                "id": "test-id",
+                "choices": [{"delta": {"content": "你"}, "finish_reason": None}],
+            }
+            yield {
+                "id": "test-id",
+                "choices": [{"delta": {"content": "好"}, "finish_reason": "stop"}],
+            }
 
         class Tracked:
             def __init__(self):
@@ -410,7 +505,7 @@ def test_chat_stream_acloses_iterator(use_cfg, monkeypatch):
 
         return Tracked()
 
-    monkeypatch.setattr("deepsee_server.app.ask_async", fake_ask)
+    monkeypatch.setattr("deepsee_server.app.chat_async", fake_chat)
     resp = client.post(
         "/v1/chat/completions",
         json={"stream": True, "messages": [{"role": "user", "content": "hi"}]},
@@ -422,18 +517,24 @@ def test_chat_stream_acloses_iterator(use_cfg, monkeypatch):
 
 
 def test_chat_stream_with_vision_first_chunk(use_cfg, monkeypatch):
-    from deepsee.composer.deepseek import VisionResult
+    async def fake_transform(messages, **kw):
+        return VisionTransformResult(messages=messages, analyses=["视觉分析内容"])
 
-    async def fake_ask_with_image(image, question, **kw):
+    async def fake_chat(messages, **kw):
         async def gen():
-            yield "你"
-            yield "好"
+            yield {
+                "id": "test-id",
+                "choices": [{"delta": {"content": "你"}, "finish_reason": None}],
+            }
+            yield {
+                "id": "test-id",
+                "choices": [{"delta": {"content": "好"}, "finish_reason": "stop"}],
+            }
 
-        return VisionResult(vision="视觉分析内容", text=gen())
+        return gen()
 
-    monkeypatch.setattr(
-        "deepsee_server.app.ask_with_image_async", fake_ask_with_image
-    )
+    monkeypatch.setattr("deepsee_server.app.transform_messages_with_vision", fake_transform)
+    monkeypatch.setattr("deepsee_server.app.chat_async", fake_chat)
     resp = client.post(
         "/v1/chat/completions",
         json={
@@ -448,6 +549,7 @@ def test_chat_stream_with_vision_first_chunk(use_cfg, monkeypatch):
                 }
             ],
         },
+        headers={"X-DeepSee-Include-Vision": "1"},
     )
     assert resp.status_code == 200
     lines = [ln for ln in resp.text.splitlines() if ln.startswith("data: ")]
@@ -1086,3 +1188,246 @@ def test_gemini_malformed_400_even_without_config(monkeypatch):
     )
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == 400
+
+
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        ("/v1/chat/completions", {"messages": [{"role": "user", "content": "hi"}]}),
+        ("/v1/messages", {"messages": [{"role": "user", "content": "hi"}]}),
+        ("/v1beta/models/m:generateContent", {"contents": [{"parts": [{"text": "hi"}]}]}),
+    ],
+)
+@pytest.mark.parametrize("stream_value", ["false", 1, {}, None])
+def test_endpoints_reject_non_boolean_stream_before_loading_config(
+    monkeypatch, path, payload, stream_value
+):
+    def config_must_not_load():
+        raise AssertionError("configuration should not be loaded")
+
+    monkeypatch.setattr("deepsee_server.app._current_config", config_must_not_load)
+    resp = client.post(path, json={**payload, "stream": stream_value})
+    assert resp.status_code == 400
+
+
+def test_models_config_error_maps_to_sanitized_503(monkeypatch):
+    from deepsee.errors import ConfigError
+
+    monkeypatch.setattr(
+        "deepsee_server.app._current_config",
+        lambda: (_ for _ in ()).throw(ConfigError("secret configuration detail")),
+    )
+    resp = client.get("/v1/models")
+    assert resp.status_code == 503
+    assert resp.json()["error"]["type"] == "configuration_error"
+    assert "secret" not in resp.text
+
+
+@pytest.mark.parametrize(
+    ("path", "payload", "shape"),
+    [
+        (
+            "/v1/chat/completions",
+            {"messages": [{"role": "user", "content": "hi"}]},
+            "openai",
+        ),
+        (
+            "/analyze",
+            {"image": _png_data_url()},
+            "openai",
+        ),
+        (
+            "/v1/messages",
+            {"messages": [{"role": "user", "content": "hi"}]},
+            "anthropic",
+        ),
+        (
+            "/v1beta/models/m:generateContent",
+            {"contents": [{"parts": [{"text": "hi"}]}]},
+            "gemini",
+        ),
+    ],
+)
+def test_request_config_error_maps_to_protocol_503(monkeypatch, path, payload, shape):
+    from deepsee.errors import ConfigError
+
+    monkeypatch.setattr(
+        "deepsee_server.app._current_config",
+        lambda: (_ for _ in ()).throw(ConfigError("secret configuration detail")),
+    )
+    resp = client.post(path, json=payload)
+    assert resp.status_code == 503
+    assert "secret" not in resp.text
+    if shape == "anthropic":
+        assert resp.json()["type"] == "error"
+        assert resp.json()["error"]["type"] == "configuration_error"
+    elif shape == "gemini":
+        assert resp.json()["error"]["code"] == 503
+    else:
+        assert resp.json()["error"]["type"] == "configuration_error"
+
+
+def test_chat_passes_normalized_max_tokens_to_upstream(use_cfg, monkeypatch):
+    seen = {}
+
+    async def fake_chat(messages, **kwargs):
+        seen["max_tokens"] = kwargs["params"].get("max_tokens")
+        return {
+            "id": "test-id",
+            "choices": [{
+                "message": {"role": "assistant", "content": "ok"},
+                "finish_reason": "stop",
+            }],
+        }
+
+    monkeypatch.setattr("deepsee_server.app.chat_async", fake_chat)
+    resp = client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 123,
+        },
+    )
+    assert resp.status_code == 200
+    assert seen["max_tokens"] == 123
+
+
+def test_chat_rejects_limits_before_loading_config(monkeypatch):
+    from deepsee_server.request_limits import RequestLimits
+
+    monkeypatch.setattr(
+        "deepsee_server.app._REQUEST_LIMITS",
+        RequestLimits(
+            max_messages=1,
+            max_images=1,
+            max_text_chars=3,
+            default_max_output_tokens=2,
+            max_output_tokens=4,
+        ),
+    )
+    monkeypatch.setattr(
+        "deepsee_server.app._current_config",
+        lambda: (_ for _ in ()).throw(AssertionError("configuration should not load")),
+    )
+    resp = client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "toolong"}]},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["type"] == "invalid_request_error"
+
+
+def _wait_for_trace(trace_id: str) -> dict:
+    """Background task 可能在响应发送后才写入 trace;轮询等待该请求的条目。"""
+    import time
+
+    from deepsee_server.traces import request_traces
+
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        for trace in reversed(request_traces.list()):
+            if trace["id"] == trace_id:
+                return trace
+        time.sleep(0.01)
+    raise AssertionError(f"trace {trace_id} 未在超时前写入")
+
+
+def test_chat_stream_upstream_error_is_recorded_in_trace(use_cfg, monkeypatch):
+    from deepsee.errors import ComposeError
+
+    async def boom(messages, **kw):
+        async def gen():
+            yield {
+                "id": "test-id",
+                "choices": [{
+                    "delta": {"content": "部分内容"},
+                    "finish_reason": None,
+                }],
+            }
+            raise ComposeError(
+                "DeepSeek API 请求失败: HTTP 502",
+                model="deepseek-chat",
+                status_code=502,
+            )
+
+        return gen()
+
+    monkeypatch.setattr("deepsee_server.app.chat_async", boom)
+    resp = client.post(
+        "/v1/chat/completions",
+        json={"stream": True, "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert resp.status_code == 200
+    assert "upstream_error" in resp.text
+
+    trace = _wait_for_trace(resp.headers["X-DeepSee-Trace-Id"])
+    assert trace["status"] == 200
+    assert trace["error_type"] == "upstream_error"
+
+
+def test_messages_endpoint_stream_upstream_error_is_recorded_in_trace(
+    use_cfg, monkeypatch
+):
+    from deepsee.errors import ComposeError
+    from deepsee_server.traces import request_traces
+
+    async def boom(text, **kw):
+        async def gen():
+            yield "部分内容"
+            raise ComposeError(
+                "DeepSeek API 请求失败: HTTP 502",
+                model="deepseek-chat",
+                status_code=502,
+            )
+
+        return gen()
+
+    monkeypatch.setattr("deepsee_server.app.ask_async", boom)
+    resp = client.post(
+        "/v1/messages",
+        json={
+            "stream": True,
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 100,
+        },
+    )
+    assert resp.status_code == 200
+    assert "upstream_error" in resp.text
+
+    trace = _wait_for_trace(resp.headers["X-DeepSee-Trace-Id"])
+    assert trace["status"] == 200
+    assert trace["error_type"] == "upstream_error"
+
+
+def test_gemini_endpoint_stream_upstream_error_is_recorded_in_trace(
+    use_cfg, monkeypatch
+):
+    from deepsee.errors import ComposeError
+    from deepsee_server.traces import request_traces
+
+    async def boom(text, **kw):
+        async def gen():
+            yield "部分内容"
+            raise ComposeError(
+                "DeepSeek API 请求失败: HTTP 502",
+                model="deepseek-chat",
+                status_code=502,
+            )
+
+        return gen()
+
+    monkeypatch.setattr("deepsee_server.app.ask_async", boom)
+    resp = client.post(
+        "/v1beta/models/m:generateContent",
+        json={
+            "stream": True,
+            "contents": [{"parts": [{"text": "hi"}]}],
+        },
+    )
+    assert resp.status_code == 200
+    # Gemini 错误形状只有 code/message,没有 type 字段;错误仍以 chunk 发出
+    assert '"error"' in resp.text
+
+    trace = _wait_for_trace(resp.headers["X-DeepSee-Trace-Id"])
+    assert trace["status"] == 200
+    assert trace["error_type"] == "upstream_error"

@@ -39,6 +39,21 @@ def test_request_shape(sample_image_bytes):
     assert content[1] == {"type": "text", "text": "图里有什么?"}
 
 
+def test_request_shape_includes_optional_output_limit(sample_image_bytes):
+    backend = make_backend()
+    with respx.mock:
+        route = respx.post("https://vision.example.com/v1/chat/completions").mock(
+            return_value=httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": "ok"}}]},
+            )
+        )
+        backend.describe(sample_image_bytes, "Reply OK", max_tokens=1)
+
+    payload = json.loads(route.calls[0].request.content)
+    assert payload["max_tokens"] == 1
+
+
 def test_backend_accepts_pil_image(sample_image_bytes):
     import io
     from PIL import Image
